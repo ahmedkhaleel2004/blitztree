@@ -233,8 +233,29 @@ struct GeneralSettingsView: View {
             }
             Divider()
             VStack(alignment: .leading, spacing: 4) {
-                Text("Clean Up planner").font(.callout)
-                Text(plannerSummary)
+                Picker("Clean Up planner", selection: Binding(
+                    get: {
+                        let picked = UserDefaults.standard.string(forKey: "bz.engine")
+                        // The selection must match a listed tag, or the row
+                        // renders blank — fall back to what actually exists.
+                        if let picked, picked.hasPrefix("provider:"),
+                           ProviderStore.shared.providers.contains(where: { "provider:\($0.id)" == picked }) {
+                            return picked
+                        }
+                        if let picked, picked == "claude" || picked == "codex" { return picked }
+                        if let first = ProviderStore.shared.providers.first { return "provider:\(first.id)" }
+                        return "claude"
+                    },
+                    set: { (value: String) in UserDefaults.standard.set(value, forKey: "bz.engine") }
+                )) {
+                    Text("Claude Code").tag("claude")
+                    Text("Codex").tag("codex")
+                    ForEach(ProviderStore.shared.providers) { provider in
+                        Text("\(provider.displayName) (custom)").tag("provider:\(provider.id)")
+                    }
+                }
+                .frame(width: 260)
+                Text("Which AI proposes what can go from the scan. Nothing is removed without your say.")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
@@ -245,18 +266,4 @@ struct GeneralSettingsView: View {
         .frame(maxHeight: .infinity, alignment: .top)
     }
 
-    /// What the Clean Up panel will use, in the user's language.
-    private var plannerSummary: String {
-        if let picked = UserDefaults.standard.string(forKey: "bz.engine") {
-            if picked.hasPrefix("provider:") {
-                let id = String(picked.dropFirst("provider:".count))
-                if ProviderStore.shared.providers.contains(where: { $0.id == id }) {
-                    return String(localized: "the custom provider you set in Model Providers")
-                }
-                return String(localized: "missing provider, back to the installed agent")
-            }
-            if let agent = AgentKind(rawValue: picked) { return agent.name }
-        }
-        return String(localized: "the installed agent, Claude Code first")
-    }
 }
