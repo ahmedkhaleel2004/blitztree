@@ -170,6 +170,10 @@ final class ScanModel {
     /// The first scan after launch hands itself to the agent once.
     private var autoStarted = false
 
+    /// Custom providers, for the panel's picker menu. Shared store: settings
+    /// edits land here immediately, no refresh wiring needed.
+    var providerStore: ProviderStore { ProviderStore.shared }
+
     /// The planner for the Clean Up panel. `bz.engine` names it: a CLI agent
     /// ("claude", "codex") or a custom provider ("provider:<id>"). Default:
     /// the named agent if ready, else Claude Code, else Codex.

@@ -132,3 +132,11 @@
 "Follow system" = "跟随系统";
 "Relaunch BlitzTree to apply the language." = "重新启动 BlitzTree 以应用语言设置。";
 "Relaunch" = "重新启动";
+
+/* Providers captions, General planner summary */
+"Connect a relay, a self-hosted server, or any other OpenAI- or Anthropic-compatible endpoint by its base URL, protocol, and models." = "通过基础 URL、协议和模型连接中继、自托管服务器或任何其他兼容 OpenAI 或 Anthropic 的端点。";
+"No custom providers. The Clean Up panel uses Claude Code or Codex when one is installed and signed in." = "暂无自定义提供商。清理面板在安装并登录后会使用 Claude Code 或 Codex。";
+"Clean Up planner" = "清理规划器";
+"the custom provider you set in Model Providers" = "您在模型提供商中设置的自定义提供商";
+"missing provider, back to the installed agent" = "提供商缺失，回到已安装的代理";
+"the installed agent, Claude Code first" = "已安装的代理，优先 Claude Code";

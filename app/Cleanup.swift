@@ -179,10 +179,16 @@ struct CleanupPanel: View {
                 .buttonStyle(.borderedProminent)
                 .controlSize(.large)
                 .help("\(agent.kind.name) reads this scan and suggests what can go. Nothing is removed until you say so.")
-                if model.agentEnv.ready.count > 1 {
+                if model.agentEnv.ready.count > 1 || !model.providerStore.providers.isEmpty {
                     Menu {
                         ForEach(model.agentEnv.ready) { other in
                             Button("Clean up with \(other.kind.name)") { model.startAgent(other) }
+                        }
+                        if !model.providerStore.providers.isEmpty {
+                            Divider()
+                            ForEach(model.providerStore.providers) { provider in
+                                Button("Clean up with \(provider.displayName)") { model.startProvider(provider) }
+                            }
                         }
                     } label: {
                         Image(systemName: "chevron.down")

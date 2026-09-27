@@ -132,3 +132,11 @@
 "Follow system" = "Seguir el sistema";
 "Relaunch BlitzTree to apply the language." = "Relanza BlitzTree para aplicar el idioma.";
 "Relaunch" = "Relanzar";
+
+/* Providers captions, General planner summary */
+"Connect a relay, a self-hosted server, or any other OpenAI- or Anthropic-compatible endpoint by its base URL, protocol, and models." = "Conecta un relé, un servidor autoalojado o cualquier otro punto de conexión compatible con OpenAI o Anthropic por su URL base, protocolo y modelos.";
+"No custom providers. The Clean Up panel uses Claude Code or Codex when one is installed and signed in." = "No hay proveedores personalizados. El panel de limpieza usa Claude Code o Codex cuando uno está instalado y con sesión iniciada.";
+"Clean Up planner" = "Planificador de limpieza";
+"the custom provider you set in Model Providers" = "el proveedor personalizado definido en Proveedores de modelos";
+"missing provider, back to the installed agent" = "proveedor ausente, vuelve al agente instalado";
+"the installed agent, Claude Code first" = "el agente instalado, Claude Code primero";

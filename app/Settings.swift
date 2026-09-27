@@ -22,13 +22,11 @@ struct ProvidersView: View {
                     Label("Add provider", systemImage: "plus")
                 }
             }
-            Text("Connect a relay, a self-hosted server, or any other OpenAI- or "
-                 + "Anthropic-compatible endpoint by its base URL, protocol, and models.")
+            Text("Connect a relay, a self-hosted server, or any other OpenAI- or Anthropic-compatible endpoint by its base URL, protocol, and models.")
                 .font(.callout)
                 .foregroundStyle(.secondary)
             if store.providers.isEmpty {
-                Text("No custom providers. The Clean Up panel uses Claude Code or Codex "
-                     + "when one is installed and signed in.")
+                Text("No custom providers. The Clean Up panel uses Claude Code or Codex when one is installed and signed in.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
                     .padding(.vertical, 20)
@@ -182,10 +180,11 @@ struct ProviderFormView: View {
 
 // MARK: - Language
 
-/// Languages BlitzTree ships strings for. `system` follows macOS; a picked
-/// language applies at next launch (AppleLanguages).
-let availableLanguages: [(code: String?, name: String)] = [
-    (nil, String(localized: "Follow system")),
+/// Languages BlitzTree ships strings for. The empty code means follow macOS;
+/// a picked language applies at next launch (AppleLanguages). The code is the
+/// Picker identity, so it must never be nil — nil IDs break tag matching.
+let availableLanguages: [(code: String, name: String)] = [
+    ("", String(localized: "Follow system")),
     ("en", "English"),
     ("tr", "Türkçe"),
     ("de", "Deutsch"),
@@ -196,39 +195,73 @@ let availableLanguages: [(code: String?, name: String)] = [
 ]
 
 struct GeneralSettingsView: View {
-    @State private var language = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first
+    /// The saved choice, "" when following the system.
+    @State private var language: String
+    @State private var saved: String
+
+    init() {
+        let savedCode = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? ""
+        _language = State(initialValue: savedCode)
+        _saved = State(initialValue: savedCode)
+    }
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Picker("Language", selection: Binding(
-                get: { language },
-                set: { code in
-                    language = code
-                    if let code {
-                        UserDefaults.standard.set([code], forKey: "AppleLanguages")
-                    } else {
-                        UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+        VStack(alignment: .leading, spacing: 16) {
+            GroupBox {
+                VStack(alignment: .leading, spacing: 12) {
+                    Picker("Language", selection: $language) {
+                        ForEach(availableLanguages, id: \.code) { entry in
+                            Text(entry.name).tag(entry.code)
+                        }
                     }
-                })) {
-                ForEach(availableLanguages, id: \.code) { entry in
-                    Text(entry.name).tag(entry.code)
+                    .frame(width: 280)
+                    if language != saved {
+                        HStack(spacing: 8) {
+                            Text("Relaunch BlitzTree to apply the language.")
+                                .font(.callout).foregroundStyle(.secondary)
+                            Button("Relaunch") {
+                                if language.isEmpty {
+                                    UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+                                } else {
+                                    UserDefaults.standard.set([language], forKey: "AppleLanguages")
+                                }
+                                saved = language
+                                FDA.relaunch()
+                            }
+                            .buttonStyle(.borderedProminent)
+                            .controlSize(.small)
+                        }
+                    }
                 }
+                .padding(8)
             }
-            .frame(width: 280)
-            if changed {
-                HStack {
-                    Text("Relaunch BlitzTree to apply the language.")
-                        .font(.callout).foregroundStyle(.secondary)
-                    Button("Relaunch") { FDA.relaunch() }
+            GroupBox {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text("Clean Up planner").font(.callout)
+                    Text(plannerSummary)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
                 }
+                .padding(8)
+                .frame(maxWidth: .infinity, alignment: .leading)
             }
         }
         .padding(20)
         .frame(maxWidth: 560, alignment: .leading)
     }
 
-    private var changed: Bool {
-        let current = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first
-        return current != language
+    /// What the Clean Up panel will use, in the user's language.
+    private var plannerSummary: String {
+        if let picked = UserDefaults.standard.string(forKey: "bz.engine") {
+            if picked.hasPrefix("provider:") {
+                let id = String(picked.dropFirst("provider:".count))
+                if ProviderStore.shared.providers.contains(where: { $0.id == id }) {
+                    return String(localized: "the custom provider you set in Model Providers")
+                }
+                return String(localized: "missing provider, back to the installed agent")
+            }
+            if let agent = AgentKind(rawValue: picked) { return agent.name }
+        }
+        return String(localized: "the installed agent, Claude Code first")
     }
 }

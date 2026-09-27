@@ -132,3 +132,11 @@
 "Follow system" = "システムに従う";
 "Relaunch BlitzTree to apply the language." = "言語を適用するにはBlitzTreeを再起動してください。";
 "Relaunch" = "再起動";
+
+/* Providers captions, General planner summary */
+"Connect a relay, a self-hosted server, or any other OpenAI- or Anthropic-compatible endpoint by its base URL, protocol, and models." = "リレー、セルフホストのサーバー、その他の OpenAI または Anthropic 互換エンドポイントに、ベース URL、プロトコル、モデルで接続します。";
+"No custom providers. The Clean Up panel uses Claude Code or Codex when one is installed and signed in." = "カスタムプロバイダはありません。クリーンアップパネルは、インストール済みでサインイン済みの Claude Code または Codex を使用します。";
+"Clean Up planner" = "クリーンアップのプランナー";
+"the custom provider you set in Model Providers" = "モデルプロバイダで設定したカスタムプロバイダ";
+"missing provider, back to the installed agent" = "プロバイダが見つからないため、インストール済みのエージェントに戻ります";
+"the installed agent, Claude Code first" = "インストール済みのエージェント（Claude Code を優先）";
