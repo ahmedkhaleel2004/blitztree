@@ -54,6 +54,11 @@ xcrun actool "$PWD/assets/AppIcon.icon" --compile "$PWD/$APP/Contents/Resources"
     --platform macosx --target-device mac --minimum-deployment-target $MIN_MACOS \
     --app-icon AppIcon --output-partial-info-plist "$PWD/build/icon-partial.plist" >/dev/null
 
+# Classic .lproj Localizable.strings tables (swiftc, no Xcode build system).
+for LPROJ in app/*.lproj; do
+    cp -R "$LPROJ" "$APP/Contents/Resources/"
+done
+
 # Prefer a real identity: stable code requirement -> TCC/FDA grants survive
 # rebuilds. Developer ID (paid program) with the hardened runtime and a secure
 # timestamp is what notarization needs; Apple Development is the fallback.

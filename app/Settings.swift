@@ -82,10 +82,10 @@ struct ProviderFormView: View {
         VStack(alignment: .leading, spacing: 14) {
             Text("Custom model API")
                 .font(.headline)
-            field("Provider ID", text: $id, placeholder: "acme-gateway",
-                  caption: "Lowercase identifier, starting with a letter, that uniquely names this provider in requests and as its credential name.")
-            field("Display name", text: $displayName, placeholder: "Display name")
-            field("Base URL", text: $baseURL, placeholder: "https://gateway.example/v1")
+            field(String(localized: "Provider ID"), text: $id, placeholder: "acme-gateway",
+                  caption: String(localized: "Lowercase identifier, starting with a letter, that uniquely names this provider in requests and as its credential name."))
+            field(String(localized: "Display name"), text: $displayName, placeholder: String(localized: "Display name"))
+            field(String(localized: "Base URL"), text: $baseURL, placeholder: "https://gateway.example/v1")
             Picker("API protocol", selection: $api) {
                 ForEach(APIProtocol.allCases) { proto in
                     Text(proto.label).tag(proto)
@@ -164,10 +164,10 @@ struct ProviderFormView: View {
                let list = obj["data"] as? [[String: Any]] {
                 models = list.compactMap { $0["id"] as? String }.sorted()
             } else {
-                error = "Could not read a model list from this endpoint; type the ID."
+                error = String(localized: "Could not read a model list from this endpoint; type the ID.")
             }
         } catch {
-            self.error = "Could not fetch models: \(error.localizedDescription)"
+            self.error = String(localized: "Could not fetch models: \(error.localizedDescription)")
         }
     }
 
@@ -185,7 +185,7 @@ struct ProviderFormView: View {
 /// Languages BlitzTree ships strings for. `system` follows macOS; a picked
 /// language applies at next launch (AppleLanguages).
 let availableLanguages: [(code: String?, name: String)] = [
-    (nil, "Follow system"),
+    (nil, String(localized: "Follow system")),
     ("en", "English"),
     ("tr", "Türkçe"),
     ("de", "Deutsch"),

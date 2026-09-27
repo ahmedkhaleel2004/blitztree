@@ -89,7 +89,7 @@ struct CleanupPanel: View {
                     .transition(.opacity)
             }
         }
-        .confirmationDialog(picked.count == 1 ? "Move 1 folder to the Trash?" : "Move \(picked.count) folders to the Trash?", isPresented: $confirming) {
+        .confirmationDialog(picked.count == 1 ? "Move 1 folder to the Trash?" : "Move \(String(picked.count)) folders to the Trash?", isPresented: $confirming) {
             Button("Move to Trash (\(Fmt.size(pickedBytes)))", role: .destructive) { trashPicked() }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -108,7 +108,7 @@ struct CleanupPanel: View {
                 Text("Reclaimable")
                     .font(.headline)
                 Text(model.cleanup.isEmpty ? "Nothing large to clean up"
-                     : "\(Fmt.size(totalBytes)) in \(model.cleanup.count) folders")
+                     : "\(Fmt.size(totalBytes)) in \(String(model.cleanup.count)) folders")
                     .font(.callout)
                     .foregroundStyle(.secondary)
             }
@@ -155,7 +155,7 @@ struct CleanupPanel: View {
                     confirming = true
                 } label: {
                     Text(picked.isEmpty ? "Select folders to clean up"
-                         : "Move \(picked.count) to Trash · \(Fmt.size(pickedBytes))")
+                         : "Move \(String(picked.count)) to Trash · \(Fmt.size(pickedBytes))")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
@@ -232,7 +232,7 @@ struct CleanupPanel: View {
                 Label("Let AI clean up for you", systemImage: "sparkles")
                     .font(.headline)
                 Text(installed == nil
-                     ? "\(kind.name) reads this scan and plans what can go. \(kind == .codex ? "Free with a ChatGPT account." : "Needs a Claude Pro plan.")"
+                     ? "\(kind.name) reads this scan and plans what can go. \(kind == .codex ? String(localized: "Free with a ChatGPT account.") : String(localized: "Needs a Claude Pro plan."))"
                      : "Sign in to \(kind.name) and it plans what can go from this scan.")
                     .font(.callout)
                     .foregroundStyle(.secondary)
@@ -302,8 +302,8 @@ private struct AgentRunView: View {
                     if run.phase == .thinking || !run.items.isEmpty {
                         steps
                     }
-                    if !safe.isEmpty { section("Safe to remove", safe) }
-                    if !ask.isEmpty { section("Your call", ask) }
+                    if !safe.isEmpty { section(String(localized: "Safe to remove"), safe) }
+                    if !ask.isEmpty { section(String(localized: "Your call"), ask) }
                     if run.phase == .thinking {
                         SkeletonCard()
                         if run.items.isEmpty { SkeletonCard().opacity(0.6) }
@@ -366,48 +366,48 @@ private struct AgentRunView: View {
 
     private var title: String {
         switch run.phase {
-        case .thinking: "\(run.displayName) is looking"
-        case .planned: run.items.isEmpty ? "Nothing worth removing" : "Here's the plan"
-        case .trashing: "Moving to the Trash"
-        case .staged: "In the Trash"
-        case .deleting: "Deleting"
-        case .done: "All clean"
-        case .failed: "\(run.displayName) couldn't finish"
+        case .thinking: String(localized: "\(run.displayName) is looking")
+        case .planned: run.items.isEmpty ? String(localized: "Nothing worth removing") : String(localized: "Here's the plan")
+        case .trashing: String(localized: "Moving to the Trash")
+        case .staged: String(localized: "In the Trash")
+        case .deleting: String(localized: "Deleting")
+        case .done: String(localized: "All clean")
+        case .failed: String(localized: "\(run.displayName) couldn't finish")
         }
     }
 
     private var subtitle: String {
         switch run.phase {
-        case .thinking: run.items.isEmpty ? "Reading your scan, nothing is touched" : "Writing the plan"
+        case .thinking: run.items.isEmpty ? String(localized: "Reading your scan, nothing is touched") : String(localized: "Writing the plan")
         case .planned: run.summary
-        case .trashing: "Nothing is deleted yet"
+        case .trashing: String(localized: "Nothing is deleted yet")
         case .staged: stagedLine
-        case .deleting: "Only what this cleanup moved; the rest of your Trash stays"
+        case .deleting: String(localized: "Only what this cleanup moved; the rest of your Trash stays")
         case .done: finishedLine
-        case .failed: "Nothing was changed."
+        case .failed: String(localized: "Nothing was changed.")
         }
     }
 
     private var heroLine: String {
-        guard run.phase == .done else { return "ready to delete" }
+        guard run.phase == .done else { return String(localized: "ready to delete") }
         // Less can come back than the cards said: clones share blocks, and a
         // tool's own cleanup may leave part of its folder.
         if let back = run.reclaimed, run.freed > back + back / 10 {
-            return "back on your disk · the cards estimated \(Fmt.size(run.freed))"
+            return String(localized: "back on your disk · the cards estimated \(Fmt.size(run.freed))")
         }
-        return "back on your disk"
+        return String(localized: "back on your disk")
     }
 
     private var stagedLine: String {
         let waiting = run.targets.contains { $0.isCommand && $0.status == .waiting }
-        return waiting ? "Put anything back from the Trash, or delete it for good. Tool caches are cleared then too."
-            : "Put anything back from the Trash, or delete it for good."
+        return waiting ? String(localized: "Put anything back from the Trash, or delete it for good. Tool caches are cleared then too.")
+            : String(localized: "Put anything back from the Trash, or delete it for good.")
     }
 
     private var finishedLine: String {
         let failed = run.items.filter { if case .failed = $0.status { true } else { false } }.count
-        if failed > 0 { return failed == 1 ? "One item couldn't be cleaned." : "\(failed) items couldn't be cleaned." }
-        return run.freed > 0 ? "Rescanned. The map is up to date." : "Nothing needed doing."
+        if failed > 0 { return failed == 1 ? String(localized: "One item couldn't be cleaned.") : String(localized: "\(String(failed)) items couldn't be cleaned.") }
+        return run.freed > 0 ? String(localized: "Rescanned. The map is up to date.") : String(localized: "Nothing needed doing.")
     }
 
     // MARK: Steps
@@ -428,7 +428,7 @@ private struct AgentRunView: View {
                         }
                     }
                     .frame(width: 14)
-                    Text(run.phase == .thinking ? step : "Planned in \(Int((run.planSeconds ?? 0).rounded())) s")
+                    Text(run.phase == .thinking ? step : String(localized: "Planned in \(String(Int((run.planSeconds ?? 0).rounded()))) s"))
                         .font(.callout)
                         .foregroundStyle(live ? .primary : .secondary)
                         .lineLimit(1)

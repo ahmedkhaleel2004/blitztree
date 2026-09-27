@@ -103,7 +103,7 @@ final class TreemapNSView: NSView {
             if label.node < 0 {
                 // Free-space keeps a small floating tag (it has no frame).
                 let text = label.region.width > 130
-                    ? "Free space  ·  \(Fmt.size(freeBytes))" : "Free space"
+                    ? String(localized: "Free space  ·  \(Fmt.size(freeBytes))") : String(localized: "Free space")
                 name = NSAttributedString(string: text, attributes: [
                     .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
                     .foregroundColor: NSColor.white.withAlphaComponent(0.55),
@@ -503,9 +503,9 @@ final class NodeMenu: NSObject {
 
     static func popUp(path: String, with event: NSEvent, for view: NSView) {
         let menu = NSMenu()
-        for (title, action) in [("Reveal in Finder", #selector(revealInFinder(_:))),
-                                ("Copy Path", #selector(copyPath(_:))),
-                                ("Move to Trash", #selector(moveToTrash(_:)))] {
+        for (title, action) in [(String(localized: "Reveal in Finder"), #selector(revealInFinder(_:))),
+                                (String(localized: "Copy Path"), #selector(copyPath(_:))),
+                                (String(localized: "Move to Trash"), #selector(moveToTrash(_:)))] {
             if action == #selector(moveToTrash(_:)) { menu.addItem(.separator()) }
             let item = NSMenuItem(title: title, action: action, keyEquivalent: "")
             item.target = shared
@@ -530,10 +530,10 @@ final class NodeMenu: NSObject {
         guard let path = sender.representedObject as? String else { return }
         let url = URL(fileURLWithPath: path)
         let alert = NSAlert()
-        alert.messageText = "Move \u{201C}\(url.lastPathComponent)\u{201D} to Trash?"
+        alert.messageText = String(localized: "Move \u{201C}\(url.lastPathComponent)\u{201D} to Trash?")
         alert.informativeText = path
-        alert.addButton(withTitle: "Move to Trash")
-        alert.addButton(withTitle: "Cancel")
+        alert.addButton(withTitle: String(localized: "Move to Trash"))
+        alert.addButton(withTitle: String(localized: "Cancel"))
         if alert.runModal() == .alertFirstButtonReturn {
             try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
             // Note: sizes refresh on next rescan; v1 keeps it simple.

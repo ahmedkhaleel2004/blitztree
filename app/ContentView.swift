@@ -217,7 +217,7 @@ struct ContentView: View {
 
     private func displayRootName() -> String {
         let p = model.scanRoot
-        if p == "/System/Volumes/Data" { return "Macintosh HD" }
+        if p == "/System/Volumes/Data" { return String(localized: "Macintosh HD") }
         return (p as NSString).lastPathComponent.isEmpty ? p : (p as NSString).lastPathComponent
     }
 
@@ -292,14 +292,14 @@ private struct ScanStatusBar: View {
                             // not a permissions problem the user can fix.
                             let gap = model.unscannedBytes > 1_000_000_000
                                 ? " · ~\(Fmt.size(model.unscannedBytes)) root-only" : ""
-                            Text("\(tree.errors) system folders unreadable\(gap)")
+                            Text("\(String(tree.errors)) system folders unreadable\(gap)")
                                 .font(.caption)
                                 .foregroundStyle(.tertiary)
                         } else {
                             Button {
                                 openFullDiskAccessSettings()
                             } label: {
-                                Label("\(tree.errors) folders skipped — grant Full Disk Access", systemImage: "lock.shield")
+                                Label("\(String(tree.errors)) folders skipped — grant Full Disk Access", systemImage: "lock.shield")
                                     .font(.caption)
                             }
                             .buttonStyle(.borderless)
@@ -654,10 +654,10 @@ struct OutlinePanel: NSViewRepresentable {
         outline.autoresizesOutlineColumn = false
 
         let name = NSTableColumn(identifier: .init("name"))
-        name.title = "Name"
+        name.title = String(localized: "Name")
         name.minWidth = 120
         let size = NSTableColumn(identifier: .init("size"))
-        size.title = "Size"
+        size.title = String(localized: "Size")
         size.width = 92; size.minWidth = 84; size.maxWidth = 116
         let pct = NSTableColumn(identifier: .init("pct"))
         pct.title = "%"
