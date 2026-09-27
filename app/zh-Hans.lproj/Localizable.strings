@@ -144,3 +144,5 @@
 /* Setup offer: custom providers */
 "Or use any model — a self-hosted server, a relay, a gateway." = "或使用任意模型——自托管服务器、中继或网关。";
 "Set up a model provider" = "";
+
+"Add a model provider" = "添加模型提供商";

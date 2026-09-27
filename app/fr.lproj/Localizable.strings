@@ -144,3 +144,5 @@
 /* Setup offer: custom providers */
 "Or use any model — a self-hosted server, a relay, a gateway." = "Ou utilisez n'importe quel modèle — un serveur auto-hébergé, un relais, une passerelle.";
 "Set up a model provider" = "";
+
+"Add a model provider" = "Ajouter un fournisseur de modèles";

@@ -48,6 +48,7 @@ struct ProvidersView: View {
         }
         .padding(20)
         .frame(maxWidth: 560, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .top)
         .sheet(item: $editing) { form in
             ProviderFormView(initial: form)
         }
@@ -180,11 +181,11 @@ struct ProviderFormView: View {
 
 // MARK: - Language
 
-/// Languages BlitzTree ships strings for. The empty code means follow macOS;
-/// a picked language applies at next launch (AppleLanguages). The code is the
-/// Picker identity, so it must never be nil — nil IDs break tag matching.
+/// Languages BlitzTree ships strings for. "system" follows macOS; a picked
+/// language applies at next launch (AppleLanguages). Never use "" as a Picker
+/// identity: an empty tag renders as a blank selection row.
 let availableLanguages: [(code: String, name: String)] = [
-    ("", String(localized: "Follow system")),
+    ("system", String(localized: "Follow system")),
     ("en", "English"),
     ("tr", "Türkçe"),
     ("de", "Deutsch"),
@@ -195,59 +196,53 @@ let availableLanguages: [(code: String, name: String)] = [
 ]
 
 struct GeneralSettingsView: View {
-    /// The saved choice, "" when following the system.
+    /// The saved choice, "system" when following macOS.
     @State private var language: String
     @State private var saved: String
 
     init() {
-        let savedCode = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? ""
+        let savedCode = UserDefaults.standard.stringArray(forKey: "AppleLanguages")?.first ?? "system"
         _language = State(initialValue: savedCode)
         _saved = State(initialValue: savedCode)
     }
 
     var body: some View {
         VStack(alignment: .leading, spacing: 16) {
-            GroupBox {
-                VStack(alignment: .leading, spacing: 12) {
-                    Picker("Language", selection: $language) {
-                        ForEach(availableLanguages, id: \.code) { entry in
-                            Text(entry.name).tag(entry.code)
-                        }
-                    }
-                    .frame(width: 280)
-                    if language != saved {
-                        HStack(spacing: 8) {
-                            Text("Relaunch BlitzTree to apply the language.")
-                                .font(.callout).foregroundStyle(.secondary)
-                            Button("Relaunch") {
-                                if language.isEmpty {
-                                    UserDefaults.standard.removeObject(forKey: "AppleLanguages")
-                                } else {
-                                    UserDefaults.standard.set([language], forKey: "AppleLanguages")
-                                }
-                                saved = language
-                                FDA.relaunch()
-                            }
-                            .buttonStyle(.borderedProminent)
-                            .controlSize(.small)
-                        }
-                    }
+            Picker("Language", selection: $language) {
+                ForEach(availableLanguages, id: \.code) { entry in
+                    Text(entry.name).tag(entry.code)
                 }
-                .padding(8)
             }
-            GroupBox {
-                VStack(alignment: .leading, spacing: 8) {
-                    Text("Clean Up planner").font(.callout)
-                    Text(plannerSummary)
-                        .font(.caption)
-                        .foregroundStyle(.secondary)
+            .frame(width: 260)
+            if language != saved {
+                HStack(spacing: 8) {
+                    Text("Relaunch BlitzTree to apply the language.")
+                        .font(.callout).foregroundStyle(.secondary)
+                    Button("Relaunch") {
+                        if language == "system" {
+                            UserDefaults.standard.removeObject(forKey: "AppleLanguages")
+                        } else {
+                            UserDefaults.standard.set([language], forKey: "AppleLanguages")
+                        }
+                        saved = language
+                        FDA.relaunch()
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .controlSize(.small)
                 }
-                .padding(8)
-                .frame(maxWidth: .infinity, alignment: .leading)
             }
+            Divider()
+            VStack(alignment: .leading, spacing: 4) {
+                Text("Clean Up planner").font(.callout)
+                Text(plannerSummary)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            Spacer(minLength: 0)
         }
-        .padding(20)
-        .frame(maxWidth: 560, alignment: .leading)
+        .padding(24)
+        .frame(maxWidth: 420, alignment: .leading)
+        .frame(maxHeight: .infinity, alignment: .top)
     }
 
     /// What the Clean Up panel will use, in the user's language.

@@ -144,3 +144,5 @@
 /* Setup offer: custom providers */
 "Or use any model — a self-hosted server, a relay, a gateway." = "Ya da herhangi bir model kullanın — kendi sunucunuz, bir aktarıcı, bir ağ geçidi.";
 "Set up a model provider" = "";
+
+"Add a model provider" = "Model sağlayıcı ekle";

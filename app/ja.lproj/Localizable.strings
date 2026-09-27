@@ -144,3 +144,5 @@
 /* Setup offer: custom providers */
 "Or use any model — a self-hosted server, a relay, a gateway." = "または任意のモデルを使用 — セルフホストサーバー、リレー、ゲートウェイ。";
 "Set up a model provider" = "";
+
+"Add a model provider" = "モデルプロバイダを追加";

@@ -257,19 +257,13 @@ struct CleanupPanel: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
                 .frame(maxWidth: .infinity)
-            Divider()
-            // The panel is not only about the two CLIs: any OpenAI- or
-            // Anthropic-compatible endpoint works, set up in Settings.
-            VStack(alignment: .leading, spacing: 4) {
-                Text("Or use any model — a self-hosted server, a relay, a gateway.")
-                    .font(.caption)
+            HStack(spacing: 4) {
+                Text("Or").font(.caption).foregroundStyle(.tertiary)
+                SettingsLink { Text("Add a model provider").font(.caption) }
+                    .buttonStyle(.plain)
                     .foregroundStyle(.secondary)
-                SettingsLink {
-                    Label("Set up a model provider", systemImage: "point.3.filled.connected.trianglepath.dotted")
-                        .font(.caption)
-                }
             }
-            .frame(maxWidth: .infinity, alignment: .leading)
+            .frame(maxWidth: .infinity)
         }
     }
 
