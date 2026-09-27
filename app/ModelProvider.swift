@@ -156,20 +156,30 @@ nonisolated final class LLMPlanClient {
         task = Task { [provider, apiKey] in
             var parser = PartialPlanParser()
             do {
-                let full = try await Self.stream(provider: provider, apiKey: apiKey, prompt: prompt) { delta in
-                    for item in parser.append(delta) { emit(.item(item)) }
-                }
-                // The finished text is authoritative when it decodes — strict
-                // JSON, fenced JSON, or prose around the object.
-                if Task.isCancelled {
-                } else if let decoded = PlanJSON.decode(text: full) {
-                    emit(.plan(summary: decoded.0, items: decoded.1))
-                } else if parser.hasInput {
-                    // Deltas streamed but the strict JSON never closed (or a
-                    // non-SSE body never arrived): the partial cards stand.
-                    emit(.failed("The reply was not valid plan JSON."))
-                } else {
-                    emit(.failed("The endpoint returned no plan."))
+                // The network layer yields deltas; the parser mutates only
+                // here, in the task body, where the isolation checker can
+                // follow it.
+                var full = ""
+                for try await event in Self.streamEvents(provider: provider, apiKey: apiKey, prompt: prompt) {
+                    switch event {
+                    case .delta(let delta):
+                        full += delta
+                        for item in parser.append(delta) { emit(.item(item)) }
+                    case .done:
+                        // The finished text is authoritative when it decodes —
+                        // strict JSON, fenced JSON, or prose around the object.
+                        if let decoded = PlanJSON.decode(text: full) {
+                            emit(.plan(summary: decoded.0, items: decoded.1))
+                        } else if parser.hasInput {
+                            // Deltas streamed but the strict JSON never closed
+                            // (or a non-SSE body never arrived): the partial
+                            // cards stand.
+                            emit(.failed("The reply was not valid plan JSON."))
+                        } else {
+                            emit(.failed("The endpoint returned no plan."))
+                        }
+                        return
+                    }
                 }
             } catch is CancellationError {
             } catch let error as PlanError {
@@ -180,9 +190,34 @@ nonisolated final class LLMPlanClient {
         }
     }
 
-    /// One request; returns the full concatenated text, reporting each delta.
+    /// What the network layer reports: one text delta per SSE event, then
+    /// `done` once the body is exhausted (non-SSE bodies surface their whole
+    /// message as one delta).
+    nonisolated private enum StreamEvent: Sendable {
+        case delta(String)
+        case done
+    }
+
+    /// One request as a stream of deltas.
+    private static func streamEvents(provider: LLMProvider, apiKey: String, prompt: String) -> AsyncThrowingStream<StreamEvent, Error> {
+        AsyncThrowingStream { continuation in
+            let task = Task { [provider, apiKey] in
+                do {
+                    try await Self.stream(provider: provider, apiKey: apiKey, prompt: prompt) { delta in
+                        continuation.yield(.delta(delta))
+                    }
+                    continuation.yield(.done)
+                    continuation.finish()
+                } catch {
+                    continuation.finish(throwing: error)
+                }
+            }
+            continuation.onTermination = { _ in task.cancel() }
+        }
+    }
+
     private static func stream(provider: LLMProvider, apiKey: String, prompt: String,
-                               onDelta: (String) -> Void) async throws -> String {
+                               onDelta: @escaping @Sendable (String) -> Void) async throws {
         let url = provider.api.path(for: provider.baseURL)
         var request = URLRequest(url: url, timeoutInterval: 600)
         request.httpMethod = "POST"
@@ -223,7 +258,6 @@ nonisolated final class LLMPlanClient {
             throw PlanError.http(http.statusCode, String(decoding: data, as: UTF8.self))
         }
 
-        var full = ""
         var sawSSE = false
         var rawBody = ""
         // Server-sent events: `data:` lines, JSON payloads per protocol.
@@ -235,7 +269,6 @@ nonisolated final class LLMPlanClient {
             if payload == "[DONE]" { break }
             guard let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
             if let delta = Self.delta(in: obj, api: provider.api) {
-                full += delta
                 onDelta(delta)
             }
         }
@@ -245,13 +278,12 @@ nonisolated final class LLMPlanClient {
             if let obj = try? JSONSerialization.jsonObject(with: Data(rawBody.utf8)) as? [String: Any],
                let choices = obj["choices"] as? [[String: Any]],
                let content = (choices.first?["message"] as? [String: Any])?["content"] as? String {
-                full = content
+                onDelta(content)
             } else {
                 // Some relays answer with the plan object itself.
-                full = rawBody
+                onDelta(rawBody)
             }
         }
-        return full
     }
 
     /// The one text delta of an event, whatever the wire format.
