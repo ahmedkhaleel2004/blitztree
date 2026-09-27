@@ -35,4 +35,10 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
+      - run: |
+          # The image pins an older default Xcode; the newest one installed
+          # has the Swift 6.1+ that build.sh probes for.
+          LATEST=$(ls -d /Applications/Xcode*.app | sort -V | tail -1)
+          echo "Selecting $LATEST"
+          sudo xcode-select -s "$LATEST/Contents/Developer"
       - run: ./build.sh
