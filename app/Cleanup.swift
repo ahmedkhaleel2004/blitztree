@@ -79,7 +79,7 @@ struct CleanupPanel: View {
     var body: some View {
         Group {
             if let run = model.agentRun {
-                AgentRunView(run: run, model: model, retry: { model.startAgent(run.agent) }) {
+                AgentRunView(run: run, model: model, retry: { model.restart(run) }) {
                     run.cancel()
                     withAnimation(.snappy) { model.agentRun = nil }
                 }
@@ -196,6 +196,19 @@ struct CleanupPanel: View {
                 }
             }
             .disabled(model.tree == nil || model.scanning)
+        } else if let provider = model.preferredProvider {
+            // A custom endpoint needs no install or sign-in: it is ready once
+            // its model and key are set in Settings.
+            Button {
+                model.startProvider(provider)
+            } label: {
+                Label("Clean up with \(provider.displayName)", systemImage: "sparkles")
+                    .frame(maxWidth: .infinity)
+            }
+            .buttonStyle(.borderedProminent)
+            .controlSize(.large)
+            .disabled(model.tree == nil || model.scanning)
+            .help("\(provider.displayName) reads this scan and suggests what can go. Nothing is removed until you say so.")
         } else if let setup = model.agentSetup {
             SetupProgress(setup: setup) {
                 setup.cancel()
@@ -353,13 +366,13 @@ private struct AgentRunView: View {
 
     private var title: String {
         switch run.phase {
-        case .thinking: "\(run.agent.kind.name) is looking"
+        case .thinking: "\(run.displayName) is looking"
         case .planned: run.items.isEmpty ? "Nothing worth removing" : "Here's the plan"
         case .trashing: "Moving to the Trash"
         case .staged: "In the Trash"
         case .deleting: "Deleting"
         case .done: "All clean"
-        case .failed: "\(run.agent.kind.name) couldn't finish"
+        case .failed: "\(run.displayName) couldn't finish"
         }
     }
 

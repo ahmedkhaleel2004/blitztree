@@ -15,5 +15,16 @@ struct BlitzTreeApp: App {
                 .preferredColorScheme(.dark)
         }
         .windowStyle(.automatic)
+
+        // Cmd+, — language and custom model providers.
+        Settings {
+            TabView {
+                GeneralSettingsView()
+                    .tabItem { Label("General", systemImage: "gear") }
+                ProvidersView()
+                    .tabItem { Label("Model Providers", systemImage: "point.3.filled.connected.trianglepath.dotted") }
+            }
+            .frame(minHeight: 360)
+        }
     }
 }

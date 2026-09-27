@@ -578,7 +578,14 @@ final class AgentRun {
     /// → `staged` → Delete for good → `done`.
     enum Phase: Equatable { case thinking, planned, trashing, staged, deleting, done, failed(String) }
 
-    let agent: InstalledAgent
+    /// Nil when the plan comes from a custom provider over HTTP.
+    let agent: InstalledAgent?
+    /// Nil when the plan comes from a CLI agent. The endpoint never runs
+    /// tools — it only writes the plan; the guards and the two-step delete
+    /// below are identical for both sources.
+    let provider: LLMProvider?
+    /// What the panel calls the planner: the CLI agent's or the provider's name.
+    var displayName: String { agent?.kind.name ?? provider?.displayName ?? "The assistant" }
     private(set) var phase: Phase = .thinking
     /// What the agent has done so far, in plain words; the last one is live.
     private(set) var steps: [String] = ["Reading your scan"]
@@ -594,9 +601,10 @@ final class AgentRun {
     private let onFinish: () -> Void
     private var preparationTask: Task<Void, Never>?
 
-    init(agent: InstalledAgent, env: AgentEnvironment, tree: Tree, scanRoot: String,
-         known: [CleanupItem], onFinish: @escaping () -> Void) {
+    init(agent: InstalledAgent?, env: AgentEnvironment, tree: Tree, scanRoot: String,
+         known: [CleanupItem], provider: LLMProvider? = nil, onFinish: @escaping () -> Void) {
         self.agent = agent
+        self.provider = provider
         self.scanRoot = scanRoot
         self.tree = tree
         self.onFinish = onFinish
@@ -612,7 +620,7 @@ final class AgentRun {
             // must not launch an agent after cancellation.
             guard !Task.isCancelled, let self else { return }
             preparationTask = nil
-            step("Asking \(agent.kind.name) what can go")
+            step("Asking \(displayName) what can go")
             start(input: input, env: env)
         }
     }
@@ -656,11 +664,19 @@ final class AgentRun {
         preparationTask = nil
         process?.terminate()
         process = nil
+        planClient?.cancel()
+        planClient = nil
     }
+
+    /// Custom endpoint runs need no process: the client streams SSE straight
+    /// from the HTTP response into the same event pipeline.
+    private var planClient: LLMPlanClient?
 
     // MARK: Agent process
 
     private func start(input: String, env: AgentEnvironment) {
+        if let provider { startProvider(input: input, provider: provider); return }
+        guard let agent else { return }
         let folder = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
             .appendingPathComponent("BlitzTree", isDirectory: true)
         try? FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
@@ -727,7 +743,7 @@ final class AgentRun {
         do {
             try process.run()
         } catch {
-            phase = .failed("Couldn't start \(agent.kind.name): \(error.localizedDescription)")
+            phase = .failed("Couldn't start \(displayName): \(error.localizedDescription)")
             return
         }
         self.process = process
@@ -740,6 +756,19 @@ final class AgentRun {
         } else {
             reader.begin()
         }
+    }
+
+    /// Custom provider: stream the plan over HTTP. No process, no PATH, no
+    /// working folder — the endpoint only ever sees the prompt text (folder
+    /// paths and sizes, never file contents) and answers with plan JSON.
+    private func startProvider(input: String, provider: LLMProvider) {
+        let client = LLMPlanClient(provider: provider,
+                                   apiKey: ProviderStore.getKey(for: provider.id) ?? "")
+        planClient = client
+        client.plan(input) { [weak self] event in
+            DispatchQueue.main.async { MainActor.assumeIsolated { self?.handle(event) } }
+        }
+        step("Asking \(displayName) what can go")
     }
 
     private func handle(_ event: AgentStreamReader.Event) {
@@ -760,7 +789,10 @@ final class AgentRun {
             }
             finishPlanning()
         case .failed(let message):
-            phase = .failed(message)
+            // A CLI run that dies after streaming cards still finishes
+            // planning with what arrived; a provider whose JSON never
+            // decoded strictly gets the same grace.
+            if !items.isEmpty { finishPlanning() } else { phase = .failed(message) }
         }
     }
 
@@ -770,9 +802,9 @@ final class AgentRun {
         if !items.isEmpty {
             finishPlanning()
         } else if status != 0 {
-            phase = .failed(stderr.isEmpty ? "\(agent.kind.name) stopped (exit \(status))." : stderr)
+            phase = .failed(stderr.isEmpty ? "\(displayName) stopped (exit \(status))." : stderr)
         } else {
-            phase = .failed("\(agent.kind.name) didn't return a plan.")
+            phase = .failed("\(displayName) didn't return a plan.")
         }
     }
 
@@ -1159,7 +1191,7 @@ nonisolated final class AgentStreamReader: @unchecked Sendable {
         }
     }
 
-    private static func decodePlan(_ obj: [String: Any]) -> (String, [PlanItemSpec])? {
+    static func decodePlan(_ obj: [String: Any]) -> (String, [PlanItemSpec])? {
         guard let data = try? JSONSerialization.data(withJSONObject: obj["items"] ?? []),
               let items = try? JSONDecoder().decode([PlanItemSpec].self, from: data) else { return nil }
         return ((obj["summary"] as? String) ?? "", items)
