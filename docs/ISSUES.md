@@ -13,3 +13,4 @@ one issue with acceptance criteria; status mirrors the checklist below.
 | [S5](issues/S5-codex-installer-checksum.md) | Pin checksum for Codex installer | Low | resolved |
 | [S6](issues/S6-command-exact-match.md) | Exact-match commands that take no argument | Low | resolved |
 | [T1](issues/T1-ci-workflow.md) | CI: cargo test + Swift build on every push | — | resolved |
+| [F1](issues/F1-custom-providers-and-l10n.md) | Custom model providers + multilingual UI | feature | resolved |
