@@ -148,3 +148,6 @@
 "Add a model provider" = "添加模型提供商";
 "Or" = "或";
 "Which AI proposes what can go from the scan. Nothing is removed without your say." = "哪个 AI 建议可从扫描中清理的内容。未经您确认不会删除任何内容。";
+
+"Save changes" = "保存更改";
+"HTTP %@: %@" = "HTTP %@: %@";

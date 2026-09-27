@@ -148,3 +148,6 @@
 "Add a model provider" = "モデルプロバイダを追加";
 "Or" = "または";
 "Which AI proposes what can go from the scan. Nothing is removed without your say." = "スキャンから何を消せるか提案する AI の選択。あなたの確認なしに削除はしません。";
+
+"Save changes" = "変更を保存";
+"HTTP %@: %@" = "HTTP %@: %@";

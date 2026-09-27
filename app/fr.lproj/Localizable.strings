@@ -148,3 +148,6 @@
 "Add a model provider" = "Ajouter un fournisseur de modèles";
 "Or" = "ou";
 "Which AI proposes what can go from the scan. Nothing is removed without your say." = "L'IA qui propose ce peut partir du scan. Rien n'est supprimé sans votre accord.";
+
+"Save changes" = "Enregistrer les modifications";
+"HTTP %@: %@" = "HTTP %@: %@";

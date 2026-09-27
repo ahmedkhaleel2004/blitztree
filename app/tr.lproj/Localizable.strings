@@ -148,3 +148,6 @@
 "Add a model provider" = "Model sağlayıcı ekle";
 "Or" = "veya";
 "Which AI proposes what can go from the scan. Nothing is removed without your say." = "Taramadan neler gidebileceğini hangi yapay zekanın önereceği. Siz demeden hiçbir şey silinmez.";
+
+"Save changes" = "Değişiklikleri kaydet";
+"HTTP %@: %@" = "HTTP %@: %@";

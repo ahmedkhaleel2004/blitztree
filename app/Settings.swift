@@ -60,6 +60,7 @@ enum ProviderForm: Identifiable {
     case new
     case existing(LLMProvider)
     var id: String { switch self { case .new: "new"; case .existing(let p): p.id } }
+    var isNew: Bool { if case .new = self { return true }; return false }
 }
 
 /// The add/edit sheet: provider ID, display name, base URL, protocol, key,
@@ -117,7 +118,8 @@ struct ProviderFormView: View {
             HStack {
                 Spacer()
                 Button("Cancel", role: .cancel) { dismiss() }
-                Button("Create provider") { save() }
+                Button(initial.isNew ? String(localized: "Create provider")
+                                      : String(localized: "Save changes")) { save() }
                     .buttonStyle(.borderedProminent)
                     .disabled(!isValid)
             }
@@ -158,7 +160,18 @@ struct ProviderFormView: View {
         request.timeoutInterval = 15
         if !key.isEmpty { request.setValue("Bearer \(key)", forHTTPHeaderField: "Authorization") }
         do {
-            let (data, _) = try await URLSession.shared.data(for: request)
+            let (data, response) = try await URLSession.shared.data(for: request)
+            guard let http = response as? HTTPURLResponse else { return }
+            let body = String(decoding: data, as: UTF8.self)
+            guard (200..<300).contains(http.statusCode) else {
+                // Endpoints say why (bad key, wrong URL); quote them rather
+                // than a generic caption.
+                let message = (try? JSONSerialization.jsonObject(with: data) as? [String: Any])
+                    .flatMap { $0["error"] as? [String: Any] }?["message"] as? String
+                    ?? body.split(separator: "\n").first.map(String.init) ?? ""
+                error = String(localized: "HTTP \(http.statusCode): \(message.prefix(200))")
+                return
+            }
             if let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
                let list = obj["data"] as? [[String: Any]] {
                 models = list.compactMap { $0["id"] as? String }.sorted()
