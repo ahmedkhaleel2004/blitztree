@@ -20,9 +20,9 @@ nonisolated enum APIProtocol: String, Codable, CaseIterable, Identifiable {
 
     var label: String {
         switch self {
-        case .openAIChat: "OpenAI Chat Completions"
-        case .openAIResponses: "OpenAI Responses"
-        case .anthropic: "Anthropic Messages"
+        case .openAIChat: return "OpenAI Chat Completions"
+        case .openAIResponses: return "OpenAI Responses"
+        case .anthropic: return "Anthropic Messages"
         }
     }
 
@@ -128,9 +128,18 @@ final class ProviderStore {
 
 // MARK: - The streaming plan request
 
+/// What a provider run reports, mapped 1:1 onto the CLI agents' event
+/// pipeline by the caller: cards as they are written, then the plan.
+nonisolated enum LLMEvent: Sendable {
+    case item(PlanItemSpec)
+    case plan(summary: String, items: [PlanItemSpec])
+    case failed(String)
+}
+
 /// Speaks one of the three wire protocols above and turns the answer into
-/// AgentStreamReader events, so the run panel behaves identically for CLI
-/// agents and custom providers: cards appear as the JSON is written.
+/// events. Streaming SSE is the happy path; a plain (non-streaming) JSON
+/// body and fenced/prose-wrapped JSON are both handled, because real
+/// endpoints and real models do all of it.
 nonisolated final class LLMPlanClient {
     private let provider: LLMProvider
     private let apiKey: String
@@ -143,28 +152,28 @@ nonisolated final class LLMPlanClient {
 
     func cancel() { task?.cancel() }
 
-    /// Streams the plan. Emits each finished item as it is parsed, then either
-    /// the complete (strictly decoded) plan or an error.
-    func plan(_ prompt: String, emit: @escaping @Sendable (AgentStreamReader.Event) -> Void) {
+    func plan(_ prompt: String, emit: @escaping @Sendable (LLMEvent) -> Void) {
         task = Task { [provider, apiKey] in
             var parser = PartialPlanParser()
             do {
                 let full = try await Self.stream(provider: provider, apiKey: apiKey, prompt: prompt) { delta in
                     for item in parser.append(delta) { emit(.item(item)) }
                 }
-                // The final JSON is authoritative when it decodes at all.
-                if let data = full.data(using: .utf8),
-                   let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
-                   let decoded = AgentStreamReader.decodePlan(obj) {
+                // The finished text is authoritative when it decodes — strict
+                // JSON, fenced JSON, or prose around the object.
+                if Task.isCancelled {
+                } else if let decoded = PlanJSON.decode(text: full) {
                     emit(.plan(summary: decoded.0, items: decoded.1))
-                } else if Task.isCancelled {
-                    // Cancelled mid-run: nothing to say.
-                } else {
-                    // Strict JSON never arrived; partial cards still get shown
-                    // (processEnded finishes a thinking run that has items).
+                } else if parser.hasInput {
+                    // Deltas streamed but the strict JSON never closed (or a
+                    // non-SSE body never arrived): the partial cards stand.
                     emit(.failed("The reply was not valid plan JSON."))
+                } else {
+                    emit(.failed("The endpoint returned no plan."))
                 }
             } catch is CancellationError {
+            } catch let error as PlanError {
+                emit(.failed(error.errorDescription ?? "The request failed."))
             } catch {
                 emit(.failed(error.localizedDescription))
             }
@@ -172,8 +181,6 @@ nonisolated final class LLMPlanClient {
     }
 
     /// One request; returns the full concatenated text, reporting each delta.
-    /// The callback is plain, not @Sendable: the event loop runs in the
-    /// caller's task, and the caller's parser state is only touched there.
     private static func stream(provider: LLMProvider, apiKey: String, prompt: String,
                                onDelta: (String) -> Void) async throws -> String {
         let url = provider.api.path(for: provider.baseURL)
@@ -184,8 +191,12 @@ nonisolated final class LLMPlanClient {
         switch provider.api {
         case .openAIChat:
             request.setValue("Bearer \(apiKey)", forHTTPHeaderField: "Authorization")
+            // json_mode is the widely supported floor for OpenAI-compatible
+            // endpoints (Ollama, vLLM, gateways); the schema text in the
+            // prompt carries the structure.
             body = [
                 "model": provider.model, "stream": true,
+                "response_format": ["type": "json_object"],
                 "messages": [["role": "user", "content": prompt]],
             ]
         case .openAIResponses:
@@ -213,15 +224,31 @@ nonisolated final class LLMPlanClient {
         }
 
         var full = ""
+        var sawSSE = false
+        var rawBody = ""
         // Server-sent events: `data:` lines, JSON payloads per protocol.
         for try await line in bytes.lines {
+            rawBody += line + "\n"
             guard line.hasPrefix("data:") else { continue }
+            sawSSE = true
             let payload = line.dropFirst(5).trimmingCharacters(in: .whitespaces)
             if payload == "[DONE]" { break }
             guard let obj = try? JSONSerialization.jsonObject(with: Data(payload.utf8)) as? [String: Any] else { continue }
             if let delta = Self.delta(in: obj, api: provider.api) {
                 full += delta
                 onDelta(delta)
+            }
+        }
+        // Endpoints that ignore `stream: true` answer with one plain JSON
+        // body. Chat shape: the plan is inside choices[0].message.content.
+        if !sawSSE {
+            if let obj = try? JSONSerialization.jsonObject(with: Data(rawBody.utf8)) as? [String: Any],
+               let choices = obj["choices"] as? [[String: Any]],
+               let content = (choices.first?["message"] as? [String: Any])?["content"] as? String {
+                full = content
+            } else {
+                // Some relays answer with the plan object itself.
+                full = rawBody
             }
         }
         return full
