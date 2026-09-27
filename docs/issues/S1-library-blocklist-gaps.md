@@ -45,8 +45,10 @@ Scripts`.
 
 ## Acceptance criteria
 
-- [ ] `blockReason(path:)` returns a reason for every path above and
+- [x] `blockReason(path:)` returns a reason for every path above and
       anything inside them.
-- [ ] `~/Library/Caches/<tool>` style paths (named subfolder of an
+- [x] `~/Library/Caches/<tool>` style paths (named subfolder of an
       allowed parent) still pass when they match the cleanup kinds.
 - [ ] A fixture test enumerates the list and asserts blocking.
+      *(Swift has no test infrastructure in this repo; the blocklist is
+      enforced in `CleanupGuard.neverClean` and checked by review only.)*

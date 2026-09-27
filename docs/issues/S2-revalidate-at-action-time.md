@@ -23,8 +23,8 @@ is acted on anyway. Fail-open on a check that only exists at plan time.
 
 ## Acceptance criteria
 
-- [ ] `trash()` refuses to trash a path that `blockReason(path:)`
+- [x] `trash()` refuses to trash a path that `blockReason(path:)`
       rejects, even if the plan accepted it.
-- [ ] `runCommand` refuses a command the guard rejects.
-- [ ] No duplicate user-visible double-blocking: items blocked at plan
+- [x] `runCommand` refuses a command the guard rejects.
+- [x] No duplicate user-visible double-blocking: items blocked at plan
       time never reach the trash loop (behavior unchanged for them).

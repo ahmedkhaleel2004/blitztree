@@ -27,8 +27,10 @@ prefix logic still matches after resolution.
 
 ## Acceptance criteria
 
-- [ ] A symlinked path resolving into any `protected` folder is
+- [x] A symlinked path resolving into any `protected` folder is
       blocked.
-- [ ] Ordinary paths behave identically to today.
-- [ ] Check interaction with `PlanItem`'s `expandingTildeInPath`
-      (already applied upstream of the guard).
+- [x] Ordinary paths behave identically to today.
+- [x] Check interaction with `PlanItem`'s `expandingTildeInPath`
+      (already applied upstream of the guard). *(No conflict:
+      `resolvingSymlinksInPath` re-expands `~` the same way the
+      `NSHomeDirectory`-based prefix check expects.)*

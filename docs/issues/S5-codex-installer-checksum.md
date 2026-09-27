@@ -32,7 +32,10 @@ tar -xzf "$t/codex.tar.gz" -C "$t"
 
 ## Acceptance criteria
 
-- [ ] Installer verifies a pinned SHA-256 before extracting/moving.
-- [ ] A mismatched checksum aborts with a clear error and installs
+- [x] Installer verifies a pinned SHA-256 before extracting/moving.
+- [x] A mismatched checksum aborts with a clear error and installs
       nothing.
-- [ ] Comment documents the pin-update procedure.
+- [x] Comment documents the pin-update procedure. *(Pinned to
+      0.157.1 with the real SHA-256 of
+      `codex-aarch64-apple-darwin.tar.gz`, verified by downloading
+      that release once.)*

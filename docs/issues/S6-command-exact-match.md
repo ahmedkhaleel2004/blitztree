@@ -37,7 +37,7 @@ Classify the allowlist:
 
 ## Acceptance criteria
 
-- [ ] Every allowlisted command is either exact-match or
+- [x] Every allowlisted command is either exact-match or
       one-trailing-token, per the table above.
-- [ ] Extra arguments/flags beyond the documented forms are rejected.
-- [ ] Prompt and guard use the same command strings.
+- [x] Extra arguments/flags beyond the documented forms are rejected.
+- [x] Prompt and guard use the same command strings.

@@ -182,10 +182,20 @@ final class AgentSetup {
             // Anthropic's own installer: everything under ~/.local, no sudo.
             return "curl -fsSL https://claude.ai/install.sh | bash"
         case .codex:
-            // OpenAI's standalone build: no Node needed.
+            // OpenAI's standalone build: no Node needed. The version and its
+            // SHA-256 are pinned so a new upstream release cannot change what
+            // gets installed silently (S5). To update the pin: set VER to the
+            // wanted release tag (github.com/openai/codex/releases), download
+            // the codex-aarch64-apple-darwin.tar.gz of that release once,
+            // run `shasum -a 256` on it, and paste the hash below.
             return """
             set -e; t=$(mktemp -d); mkdir -p "$HOME/.local/bin"
-            curl -fsSL https://github.com/openai/codex/releases/latest/download/codex-aarch64-apple-darwin.tar.gz | tar -xz -C "$t"
+            VER="0.157.1"
+            URL="https://github.com/openai/codex/releases/download/rust-v$VER/codex-aarch64-apple-darwin.tar.gz"
+            curl -fsSL "$URL" -o "$t/codex.tar.gz"
+            # SHA-256 of codex-aarch64-apple-darwin.tar.gz for $VER.
+            echo "3c45b162b7a76f51325015b1d0a8112c73219b7a9b59cd5762c37c9ba55894fa  $t/codex.tar.gz" | shasum -a 256 -c - || { echo "Codex download failed the checksum check; nothing was installed." >&2; rm -rf "$t"; exit 1; }
+            tar -xzf "$t/codex.tar.gz" -C "$t"
             mv "$t/codex-aarch64-apple-darwin" "$HOME/.local/bin/codex"; rm -rf "$t"
             """
         }
@@ -338,22 +348,54 @@ nonisolated enum CleanupGuard {
         ".local", ".local/share", "Downloads",
     ].reduce(into: []) { $0.insert(home + "/" + $1) }
 
-    /// The only commands BlitzTree runs: each tool's own cleanup.
-    static let commands = [
-        "uv cache clean", "uv cache prune", "bun pm cache rm", "npm cache clean", "pnpm store prune",
-        "yarn cache clean", "brew cleanup", "brew autoremove", "docker system prune",
-        "docker image prune", "docker builder prune", "docker container prune",
-        "xcrun simctl delete unavailable", "xcrun simctl runtime delete", "pip cache purge",
-        "pip3 cache purge", "ollama rm ", "go clean -cache", "go clean -modcache", "gem cleanup",
-        "pod cache clean", "conda clean", "mamba clean",
+    /// Folders that alter app behavior or persistence (launch agents, fonts,
+    /// keychain helpers…): the folder and everything inside it is off limits.
+    /// Unlike `Library/Caches`, no named subfolder of these is a rebuildable
+    /// cache, so they block recursively (S1).
+    static let neverClean: [String] = [
+        "Library/LaunchAgents", "Library/LaunchDaemons", "Library/Cookies", "Library/Logs",
+        "Library/Saved Application State", "Library/Spelling", "Library/Frameworks",
+        "Library/PrivilegedHelperTools", "Library/ScriptingAdditions",
+        "Library/Internet Plug-Ins", "Library/PreferencePanes", "Library/Input Methods",
+        "Library/Fonts", "Library/Services", "Library/StartupItems", "Library/Tokens",
+        "Library/Widgets", "Library/Metadata", "Library/Desktop Pictures",
+        "Library/Screen Savers", "Library/Workflows", "Library/Automator",
+        "Library/Contextual Menu Items", "Library/Compositions", "Library/DirectoryServices",
+        "Library/Calendars", "Library/Accounts", "Library/Application Scripts",
+    ].map { home + "/" + $0 }
+
+    /// The only commands BlitzTree runs: each tool's own cleanup, in exactly
+    /// these forms (S6). No-argument commands must match to the letter; flag
+    /// variants are separate entries, not prefix matches.
+    static let commands: Set<String> = [
+        "uv cache clean", "uv cache prune", "bun pm cache rm", "npm cache clean",
+        "npm cache clean --force", "pnpm store prune", "yarn cache clean", "brew cleanup",
+        "brew cleanup --prune=all", "brew autoremove", "docker system prune",
+        "docker system prune -f", "docker image prune", "docker image prune -f",
+        "docker builder prune", "docker builder prune -f", "docker container prune",
+        "xcrun simctl delete unavailable", "conda clean", "conda clean -a -y", "mamba clean",
+        "pip cache purge", "pip3 cache purge", "go clean -cache", "go clean -modcache",
+        "gem cleanup", "pod cache clean --all",
     ]
+
+    /// Commands that take exactly one trailing argument (a model, a runtime…).
+    /// Nothing beyond that one token — no extra flags — is accepted (S6).
+    static let oneArgumentCommands = ["ollama rm", "xcrun simctl runtime delete"]
 
     /// Why a path may not be touched, or nil when it may.
     static func blockReason(path: String) -> String? {
-        let p = (path as NSString).standardizingPath
+        // Resolve before matching: `trashItem` follows a symlink in the last
+        // component, so a link pointing into a protected folder must be
+        // judged by where it lands, not what it is called (S3). This also
+        // expands ~ itself, but with the same home the guard checks below.
+        let p = ((path as NSString).resolvingSymlinksInPath as NSString).standardizingPath
         guard p.hasPrefix(home + "/") else { return "Outside your home folder" }
         let rel = p.dropFirst(home.count + 1)
         guard rel.split(separator: "/").count >= 2 || rel.hasPrefix("."), !tooBroad.contains(p) else {
+            return "Too broad: other apps keep live data here"
+        }
+        // Whole persistence folders: no named subfolder inside is ever fair game (S1).
+        if neverClean.contains(where: { p == $0 || p.hasPrefix($0 + "/") }) {
             return "Too broad: other apps keep live data here"
         }
         for dir in protected where p == dir || p.hasPrefix(dir + "/") {
@@ -371,7 +413,11 @@ nonisolated enum CleanupGuard {
 
     static func blockReason(command: String) -> String? {
         let c = command.trimmingCharacters(in: .whitespaces)
-        guard commands.contains(where: { c == $0.trimmingCharacters(in: .whitespaces) || c.hasPrefix($0.hasSuffix(" ") ? $0 : $0 + " ") }) else {
+        // Argument discipline (S6): extra flags or arguments beyond the forms
+        // above are rejected, not silently run.
+        guard commands.contains(c) || oneArgumentCommands.contains(where: {
+            c.hasPrefix($0 + " ") && !c.dropFirst($0.count + 1).contains(" ")
+        }) else {
             return "BlitzTree only runs tools' own cleanup commands"
         }
         let banned = [";", "|", "&", ">", "<", "`", "$", "\n", "*", "\\"]
@@ -828,6 +874,13 @@ final class AgentRun {
             var moved: [URL] = []
             var error: String?
             for path in paths where FileManager.default.fileExists(atPath: path) {
+                // Re-check at action time: minutes can have passed since the
+                // plan was validated, so anything changed in between is not
+                // acted on (S2).
+                if let reason = CleanupGuard.blockReason(path: path) {
+                    error = error ?? reason
+                    continue
+                }
                 do {
                     var out: NSURL?
                     try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &out)
@@ -881,6 +934,9 @@ final class AgentRun {
     /// Runs a vetted cleanup command; returns an error message on failure.
     nonisolated static func runCommand(_ command: String, path: String) async -> String? {
         await Task.detached(priority: .userInitiated) {
+            // Re-check at action time: the plan was validated while streaming,
+            // so the guard runs again before anything is spawned (S2).
+            if let reason = CleanupGuard.blockReason(command: command) { return reason }
             let process = Process()
             process.executableURL = URL(fileURLWithPath: "/bin/zsh")
             process.arguments = ["-c", command]
@@ -1191,11 +1247,16 @@ nonisolated enum AgentPrompt {
           - paths: the absolute paths it covers.
           - action: "command" when the owning tool has its own cleanup and the item is that tool's \
         cache, otherwise "trash" (BlitzTree moves the paths to the Trash itself). BlitzTree only runs \
-        commands starting with one of: `uv cache clean`, `bun pm cache rm`, `npm cache clean --force`, \
-        `pnpm store prune`, `yarn cache clean`, `brew cleanup --prune=all`, `docker system prune -f`, \
-        `docker builder prune -f`, `xcrun simctl delete unavailable`, `pip cache purge`, \
-        `ollama rm <model>`, `go clean -modcache`, `gem cleanup`, `pod cache clean --all`, \
-        `conda clean -a -y`. Nothing else, no pipes, `;`, `$` or globs; it must not prompt.
+        exactly one of these commands — no extra arguments or flags: `uv cache clean`, \
+        `uv cache prune`, `bun pm cache rm`, `npm cache clean`, `npm cache clean --force`, \
+        `pnpm store prune`, `yarn cache clean`, `brew cleanup`, `brew cleanup --prune=all`, \
+        `brew autoremove`, `docker system prune`, `docker system prune -f`, `docker image prune`, \
+        `docker image prune -f`, `docker builder prune`, `docker builder prune -f`, \
+        `docker container prune`, `xcrun simctl delete unavailable`, `conda clean`, \
+        `conda clean -a -y`, `mamba clean`, `pip cache purge`, `pip3 cache purge`, \
+        `go clean -cache`, `go clean -modcache`, `gem cleanup`, `pod cache clean --all` — \
+        or one of: `ollama rm <model>`, `xcrun simctl runtime delete <id>`. \
+        Nothing else, no pipes, `;`, `$` or globs; it must not prompt.
           - command: the exact command for "command", "" for "trash".
         `npm cache clean` only empties ~/.npm/_cacache; ~/.npm/_npx is a separate "trash" item. Only \
         list caches that appear in the tables above with their real size; skip ones that are not there.
