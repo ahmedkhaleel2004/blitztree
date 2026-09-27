@@ -232,6 +232,10 @@ final class ScanModel {
             startProvider(provider)
         } else if let agent = preferredAgent {
             startAgent(agent)
+        } else if !ProviderStore.shared.providers.isEmpty {
+            // No CLI agent signed in, but a configured endpoint is ready with
+            // nothing to sign in to: use it rather than pushing the CLI setup.
+            startProvider(ProviderStore.shared.providers[0])
         } else {
             panelRequests += 1
             // QA only: BZ_QA_SETUP=claude|codex presses the setup button.

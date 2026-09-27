@@ -202,9 +202,11 @@ struct CleanupPanel: View {
                 }
             }
             .disabled(model.tree == nil || model.scanning)
-        } else if let provider = model.preferredProvider {
+        } else if let provider = model.preferredProvider ?? model.providerStore.providers.first {
             // A custom endpoint needs no install or sign-in: it is ready once
-            // its model and key are set in Settings.
+            // its model and key are set in Settings. Preferred when picked in
+            // Settings, else the first configured provider leads and the CLI
+            // sign-in offer moves below it.
             Button {
                 model.startProvider(provider)
             } label: {
@@ -215,6 +217,7 @@ struct CleanupPanel: View {
             .controlSize(.large)
             .disabled(model.tree == nil || model.scanning)
             .help("\(provider.displayName) reads this scan and suggests what can go. Nothing is removed until you say so.")
+            setupOffer
         } else if let setup = model.agentSetup {
             SetupProgress(setup: setup) {
                 setup.cancel()
