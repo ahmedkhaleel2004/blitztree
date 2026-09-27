@@ -43,6 +43,7 @@ cat > "$APP/Contents/Info.plist" <<EOF
     <key>CFBundleIconName</key><string>AppIcon</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSHumanReadableCopyright</key><string>Ahmed Khaleel</string>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
 </dict>
 </plist>
 EOF
