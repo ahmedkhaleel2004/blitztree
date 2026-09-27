@@ -31,9 +31,9 @@ nonisolated enum APIProtocol: String, Codable, CaseIterable, Identifiable {
     func path(for baseURL: URL) -> URL {
         let endsInV1 = baseURL.path.hasSuffix("/v1")
         switch self {
-        case .openAIChat: baseURL.appending(path: "chat/completions")
-        case .openAIResponses: baseURL.appending(path: "responses")
-        case .anthropic: baseURL.appending(path: endsInV1 ? "messages" : "v1/messages")
+        case .openAIChat: return baseURL.appending(path: "chat/completions")
+        case .openAIResponses: return baseURL.appending(path: "responses")
+        case .anthropic: return baseURL.appending(path: endsInV1 ? "messages" : "v1/messages")
         }
     }
 }
