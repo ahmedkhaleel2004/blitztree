@@ -38,6 +38,6 @@ developer's machine.
 
 ## Acceptance criteria
 
-- [ ] Workflow runs green on a push to `main`.
-- [ ] `cargo test` and `pytest` failures fail the build.
-- [ ] No secrets required; push access only.
+- [x] Workflow runs green on a push to `main`.
+- [x] `cargo test` and `pytest` failures fail the build.
+- [x] No secrets required; push access only.

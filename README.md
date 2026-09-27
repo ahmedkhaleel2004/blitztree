@@ -53,6 +53,21 @@ The agent runs headless and read-only: it only writes a plan from the scan Blitz
 - Caches of apps that are open are skipped until you quit them
 - "Delete for good" removes only what this cleanup moved to the Trash
 
+## Trust & permissions
+
+BlitzTree asks for Full Disk Access so the scan can read every folder on the
+disk, including the system-protected ones that normally stay out of reach.
+Everything it launches — the agent CLIs and each allowlisted cleanup command —
+inherits that same grant while it runs. The agent CLIs' own sandbox settings
+are a CLI-level policy, not an OS guarantee for anything they spawn.
+
+Cleanup commands (`uv cache clean`, `brew cleanup` and so on) are resolved
+through the shell's PATH, by design: these tools live in Homebrew, `~/.local/bin`,
+nvm and other tool-manager locations, and BlitzTree does not guess where they
+are installed. Only commands matching a small allowlist of tool-specific
+cleanup invocations are ever run, but what runs is whatever the PATH resolves —
+the trust in your own PATH is residual.
+
 ## Build from source
 
 Requires Xcode 26 or later and Rust.
