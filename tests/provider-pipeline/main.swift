@@ -14,6 +14,7 @@ func collect(_ client: LLMPlanClient, _ prompt: String) async -> (String, Int, I
 }
 
 @main struct H {
+    @MainActor
     static func main() async {
         func provider() -> LLMProvider {
             LLMProvider(id: "t", displayName: "t",

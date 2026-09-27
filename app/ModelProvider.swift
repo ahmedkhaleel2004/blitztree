@@ -139,8 +139,11 @@ nonisolated enum LLMEvent: Sendable {
 /// Speaks one of the three wire protocols above and turns the answer into
 /// events. Streaming SSE is the happy path; a plain (non-streaming) JSON
 /// body and fenced/prose-wrapped JSON are both handled, because real
-/// endpoints and real models do all of it.
-nonisolated final class LLMPlanClient {
+/// endpoints and real models do all of it. MainActor: runs are driven from
+/// AgentRun, and the network Task inherits the isolation so mutable parsing
+/// state stays in one place.
+@MainActor
+final class LLMPlanClient {
     private let provider: LLMProvider
     private let apiKey: String
     private var task: Task<Void, Never>?
