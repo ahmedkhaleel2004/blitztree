@@ -30,7 +30,7 @@ jobs:
 
   swift:
     name: Swift build
-    runs-on: macos-14
+    runs-on: macos-15 # Swift 6.1+ for -default-isolation; macos-14 pins Xcode 16.2
     continue-on-error: true # full compatibility needs Xcode 26; allow older Xcode to fail
     steps:
       - uses: actions/checkout@v4
