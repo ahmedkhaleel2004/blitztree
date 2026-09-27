@@ -140,3 +140,7 @@
 "the custom provider you set in Model Providers" = "モデルプロバイダで設定したカスタムプロバイダ";
 "missing provider, back to the installed agent" = "プロバイダが見つからないため、インストール済みのエージェントに戻ります";
 "the installed agent, Claude Code first" = "インストール済みのエージェント（Claude Code を優先）";
+
+/* Setup offer: custom providers */
+"Or use any model — a self-hosted server, a relay, a gateway." = "または任意のモデルを使用 — セルフホストサーバー、リレー、ゲートウェイ。";
+"Set up a model provider" = "";

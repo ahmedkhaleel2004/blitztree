@@ -140,3 +140,7 @@
 "the custom provider you set in Model Providers" = "您在模型提供商中设置的自定义提供商";
 "missing provider, back to the installed agent" = "提供商缺失，回到已安装的代理";
 "the installed agent, Claude Code first" = "已安装的代理，优先 Claude Code";
+
+/* Setup offer: custom providers */
+"Or use any model — a self-hosted server, a relay, a gateway." = "或使用任意模型——自托管服务器、中继或网关。";
+"Set up a model provider" = "";

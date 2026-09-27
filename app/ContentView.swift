@@ -85,14 +85,13 @@ struct ContentView: View {
     @State private var needsFDA = false
 
     private var fdaOverlay: some View {
-        VStack(spacing: 18) {
-            Image(systemName: "lock.shield")
-                .font(.system(size: 44, weight: .light))
-                .foregroundStyle(.secondary)
-            Text("BlitzTree needs Full Disk Access")
-                .font(.title2.weight(.semibold))
+        // Top-anchored like the window's other states: dead-center made the
+        // permission card float in the middle of an empty scan area.
+        VStack(alignment: .leading, spacing: 14) {
+            Label("BlitzTree needs Full Disk Access", systemImage: "lock.shield")
+                .font(.title3.weight(.semibold))
             Text("System Settings → Privacy & Security → Full Disk Access.\nRemove any old BlitzTree rows, then add /Applications/BlitzTree.app.\nmacOS only applies the permission to a freshly launched app.")
-                .multilineTextAlignment(.center)
+                .multilineTextAlignment(.leading)
                 .foregroundStyle(.secondary)
                 .font(.callout)
             HStack(spacing: 12) {
@@ -108,6 +107,10 @@ struct ContentView: View {
             .font(.caption)
             .foregroundStyle(.tertiary)
         }
+        .frame(maxWidth: 480, alignment: .leading)
+        .padding(28)
+        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+        .padding(.top, 56)
     }
 
     // MARK: toolbar

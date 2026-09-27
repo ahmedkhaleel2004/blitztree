@@ -140,3 +140,7 @@
 "the custom provider you set in Model Providers" = "der eigene Anbieter aus Modell-Anbieter";
 "missing provider, back to the installed agent" = "Anbieter fehlt, zurück zum installierten Agenten";
 "the installed agent, Claude Code first" = "der installierte Agent, zuerst Claude Code";
+
+/* Setup offer: custom providers */
+"Or use any model — a self-hosted server, a relay, a gateway." = "Oder ein beliebiges Modell — ein selbst gehosteter Server, ein Relay, ein Gateway.";
+"Set up a model provider" = "";
