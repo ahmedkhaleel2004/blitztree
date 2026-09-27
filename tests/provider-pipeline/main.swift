@@ -3,12 +3,15 @@ import Foundation
 func collect(_ client: LLMPlanClient, _ prompt: String) async -> (String, Int, Int, String) {
     await withCheckedContinuation { cont in
         var before = 0
-        client.plan(prompt) { event in
+        let emit: @Sendable (LLMEvent) -> Void = { event in
             switch event {
             case .item: before += 1
             case .plan(let s, let items): cont.resume(returning: (s, items.count, before, ""))
             case .failed(let m): cont.resume(returning: ("", 0, before, m))
             }
+        }
+        Task { @MainActor in
+            client.plan(prompt, emit: emit)
         }
     }
 }
@@ -38,6 +41,14 @@ func collect(_ client: LLMPlanClient, _ prompt: String) async -> (String, Int, I
         let r4 = await collect(LLMPlanClient(provider: provider(), apiKey: "k"), "401")
         assert(r4.3.contains("HTTP 401"), "401: \(r4)")
         print("PASS HTTP error surfaces")
+
+        // Malformed replies must return nil, not crash (the bounds of the
+        // brace span can invert; this regressed once).
+        let junk: [String] = ["}{", "}", "{", "", "no braces here", "{\"items\":[]", "}items{"]
+        for text in junk {
+            assert(PlanJSON.decode(text: text) == nil, "junk decoded: \(text)")
+        }
+        print("PASS malformed replies return nil")
 
         print("ALL OK")
     }

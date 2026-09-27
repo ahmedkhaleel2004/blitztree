@@ -109,7 +109,9 @@ nonisolated enum PlanJSON {
     /// the first `{` to the last `}` so prose around the object cannot break it.
     static func decode(text: String) -> (String, [PlanItemSpec])? {
         var body = text
-        if let start = body.firstIndex(of: "{"), let end = body.lastIndex(of: "}") {
+        // Bounds can invert ("}") on malformed replies; require a sane span
+        // or decoding would trap on the reversed range.
+        if let start = body.firstIndex(of: "{"), let end = body.lastIndex(of: "}"), start <= end {
             body = String(body[start...end])
         } else {
             return nil
