@@ -19,15 +19,15 @@ mkdir -p "$APP/Contents/MacOS" "$APP/Contents/Resources"
 echo "==> Swift UI"
 # -default-isolation needs Swift 6.1 (Xcode 16.3+). Probe it: older Xcode
 # falls back to Swift 5 mode, where isolation checking is lenient enough.
-SWIFT_VER="-swift-version 6"
-ISOLATION="-default-isolation MainActor"
+SWIFT_VER=(-swift-version 6)
+ISOLATION=(-default-isolation MainActor)
 if ! echo 'func bzProbe() {}' | swiftc -swift-version 6 -default-isolation MainActor -typecheck - >/dev/null 2>&1; then
-    SWIFT_VER="-swift-version 5"
-    ISOLATION=""
+    SWIFT_VER=(-swift-version 5)
+    ISOLATION=()
 fi
 swiftc app/*.swift \
     -import-objc-header app/bz.h \
-    -O -parse-as-library $SWIFT_VER $ISOLATION \
+    -O -parse-as-library "${SWIFT_VER[@]}" "${ISOLATION[@]}" \
     -target arm64-apple-macos$MIN_MACOS \
     -L target/release -lblitztree \
     -framework AppKit -framework SwiftUI \
