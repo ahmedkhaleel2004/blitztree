@@ -3,6 +3,7 @@
 #define BZ_H
 
 #include <stdint.h>
+#include <removefile.h> // removefile / REMOVEFILE_RECURSIVE, used by Swift
 
 typedef struct BzScan BzScan;
 
