@@ -1,0 +1,193 @@
+{
+  "platform": "macOS-26.5.2-arm64-arm-64bit-Mach-O",
+  "cpus": 12,
+  "path": "/Applications",
+  "command": "quick-wins",
+  "min_bytes": 50000000,
+  "limit": 20,
+  "binary_sha256": {
+    "baseline": "f4724ced190b85cc9b072d27c5611f0ac50dd3b1cc1abeae1095c9008c7ea86a",
+    "candidate": "2a6245f377b2f65e1f966bf6443fc06887b4ccf947a4419ba7f13b981f78fa5c"
+  },
+  "all_reports_identical": true,
+  "inventory_summary": {
+    "allocated_bytes": 104264441856,
+    "directory_count": 121515,
+    "file_count": 874291,
+    "logical_bytes": 113056815757
+  },
+  "coverage": {
+    "complete": true,
+    "entry_errors": 0,
+    "errors": 0,
+    "invalid_names": 0,
+    "policy": "Metadata only. One volume; directory symlinks and cloud-only directories are not traversed. Filesystem changes during a scan can affect results.",
+    "skipped_cloud_directories": 0,
+    "skipped_mount_points": 0
+  },
+  "summary": {
+    "baseline": {
+      "median_wall_seconds": 2.457299457862973,
+      "wall_range_seconds": [
+        2.3885609582066536,
+        2.704931457526982
+      ],
+      "median_scan_seconds": 2.44253425,
+      "median_non_scan_seconds": 0.015274832526981807,
+      "median_peak_footprint_bytes": 95682992
+    },
+    "candidate": {
+      "median_wall_seconds": 2.4661947498098016,
+      "wall_range_seconds": [
+        2.3813522504642606,
+        2.6363650830462575
+      ],
+      "median_scan_seconds": 2.452023875,
+      "median_non_scan_seconds": 0.014318666046257533,
+      "median_peak_footprint_bytes": 101515696
+    }
+  },
+  "measurements": [
+    {
+      "pair": 1,
+      "build": "baseline",
+      "wall_seconds": 2.704931457526982,
+      "scan_seconds": 2.689656625,
+      "non_scan_seconds": 0.015274832526981807,
+      "json_bytes": 15046,
+      "max_rss_bytes": 102629376,
+      "peak_footprint_bytes": 93913520
+    },
+    {
+      "pair": 1,
+      "build": "candidate",
+      "wall_seconds": 2.6363650830462575,
+      "scan_seconds": 2.622046417,
+      "non_scan_seconds": 0.014318666046257533,
+      "json_bytes": 15046,
+      "max_rss_bytes": 102793216,
+      "peak_footprint_bytes": 102072752
+    },
+    {
+      "pair": 2,
+      "build": "candidate",
+      "wall_seconds": 2.549107499420643,
+      "scan_seconds": 2.535742708,
+      "non_scan_seconds": 0.013364791420642952,
+      "json_bytes": 15046,
+      "max_rss_bytes": 103448576,
+      "peak_footprint_bytes": 102728112
+    },
+    {
+      "pair": 2,
+      "build": "baseline",
+      "wall_seconds": 2.5284348744899035,
+      "scan_seconds": 2.5114688750000003,
+      "non_scan_seconds": 0.016965999489903183,
+      "json_bytes": 15053,
+      "max_rss_bytes": 101629952,
+      "peak_footprint_bytes": 100942256
+    },
+    {
+      "pair": 3,
+      "build": "baseline",
+      "wall_seconds": 2.39625958353281,
+      "scan_seconds": 2.379758167,
+      "non_scan_seconds": 0.016501416532810342,
+      "json_bytes": 15046,
+      "max_rss_bytes": 100663296,
+      "peak_footprint_bytes": 99975600
+    },
+    {
+      "pair": 3,
+      "build": "candidate",
+      "wall_seconds": 2.54914537537843,
+      "scan_seconds": 2.532047542,
+      "non_scan_seconds": 0.01709783337842996,
+      "json_bytes": 15046,
+      "max_rss_bytes": 102236160,
+      "peak_footprint_bytes": 101515696
+    },
+    {
+      "pair": 4,
+      "build": "candidate",
+      "wall_seconds": 2.389081791974604,
+      "scan_seconds": 2.375260708,
+      "non_scan_seconds": 0.013821083974604242,
+      "json_bytes": 15046,
+      "max_rss_bytes": 105234432,
+      "peak_footprint_bytes": 104513968
+    },
+    {
+      "pair": 4,
+      "build": "baseline",
+      "wall_seconds": 2.4638347923755646,
+      "scan_seconds": 2.4492585829999998,
+      "non_scan_seconds": 0.014576209375564808,
+      "json_bytes": 15053,
+      "max_rss_bytes": 105299968,
+      "peak_footprint_bytes": 104612272
+    },
+    {
+      "pair": 5,
+      "build": "baseline",
+      "wall_seconds": 2.4196122903376818,
+      "scan_seconds": 2.405877541,
+      "non_scan_seconds": 0.013734749337681595,
+      "json_bytes": 15046,
+      "max_rss_bytes": 100352000,
+      "peak_footprint_bytes": 95682992
+    },
+    {
+      "pair": 5,
+      "build": "candidate",
+      "wall_seconds": 2.4661947498098016,
+      "scan_seconds": 2.452023875,
+      "non_scan_seconds": 0.014170874809801504,
+      "json_bytes": 15046,
+      "max_rss_bytes": 99909632,
+      "peak_footprint_bytes": 97108400
+    },
+    {
+      "pair": 6,
+      "build": "candidate",
+      "wall_seconds": 2.444950125180185,
+      "scan_seconds": 2.430066125,
+      "non_scan_seconds": 0.014884000180184653,
+      "json_bytes": 15046,
+      "max_rss_bytes": 102891520,
+      "peak_footprint_bytes": 97157552
+    },
+    {
+      "pair": 6,
+      "build": "baseline",
+      "wall_seconds": 2.457299457862973,
+      "scan_seconds": 2.44253425,
+      "non_scan_seconds": 0.014765207862973195,
+      "json_bytes": 15045,
+      "max_rss_bytes": 102662144,
+      "peak_footprint_bytes": 95502768
+    },
+    {
+      "pair": 7,
+      "build": "baseline",
+      "wall_seconds": 2.3885609582066536,
+      "scan_seconds": 2.371696541,
+      "non_scan_seconds": 0.01686441720665366,
+      "json_bytes": 15046,
+      "max_rss_bytes": 99893248,
+      "peak_footprint_bytes": 95404464
+    },
+    {
+      "pair": 7,
+      "build": "candidate",
+      "wall_seconds": 2.3813522504642606,
+      "scan_seconds": 2.366932709,
+      "non_scan_seconds": 0.014419541464260721,
+      "json_bytes": 15046,
+      "max_rss_bytes": 100696064,
+      "peak_footprint_bytes": 96993712
+    }
+  ],
+  "note": "non_scan_seconds includes process startup, path validation, report/JSON, teardown and parent overhead; it is not isolated report CPU time."
+}

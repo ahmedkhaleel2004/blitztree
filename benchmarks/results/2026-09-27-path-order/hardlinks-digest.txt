@@ -1,0 +1,2 @@
+digest 9f129405c01a4218  shape 4d6b1c475a3a7ac3  cleanup cbf29ce484222325 (0)  nodes 101001  alloc 2048000  logical 64000  files 100000  errors 0  (invariants ok)
+Baseline and candidate match exactly.

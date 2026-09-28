@@ -1,5 +1,9 @@
 # Benchmarks
 
+The [path-ordering measurements](benchmarks/PATH_ORDER.md) cover hard-link-heavy
+trees and complete JSON CLI latency, including report construction and output.
+They distinguish workload-specific gains from unchanged ordinary scan times.
+
 The [September 27 performance audit](PERFORMANCE_AUDIT.md) records the latest
 before/after scanner, rendering, pointer lookup, cleanup, and outline results,
 with reproducible harnesses and raw samples. The comparisons below are the

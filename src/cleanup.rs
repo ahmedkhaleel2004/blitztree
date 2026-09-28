@@ -116,7 +116,7 @@ pub fn find(t: &Tree, min_bytes: u64) -> Vec<Candidate> {
     found.sort_by(|a, b| {
         t.alloc[b.node as usize]
             .cmp(&t.alloc[a.node as usize])
-            .then_with(|| t.path(a.node as usize).cmp(&t.path(b.node as usize)))
+            .then_with(|| t.compare_paths(a.node as usize, b.node as usize))
     });
     found
 }

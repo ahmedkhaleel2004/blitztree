@@ -121,15 +121,42 @@ impl Tree {
         }
         path
     }
-    /// Path components from the root, compared as `str`s compare (bytewise).
-    fn path_parts(&self, mut i: u32) -> Vec<&[u8]> {
-        let mut parts = Vec::new();
-        while i != NO_PARENT {
-            parts.push(self.name_bytes(i as usize));
-            i = self.parents[i as usize];
+    /// Compare paths by their components without constructing either path.
+    /// Shared ancestors cannot affect ordering: only the first divergent
+    /// component matters, and an ancestor sorts before its descendants.
+    pub fn compare_paths(&self, mut a: usize, mut b: usize) -> std::cmp::Ordering {
+        if a == b {
+            return std::cmp::Ordering::Equal;
         }
-        parts.reverse();
-        parts
+        if self.parents[a] == self.parents[b] {
+            return self.name_bytes(a).cmp(self.name_bytes(b));
+        }
+        let depth = |mut i: usize| {
+            let mut depth = 0;
+            while i != 0 {
+                depth += 1;
+                i = self.parents[i] as usize;
+            }
+            depth
+        };
+        let (mut da, mut db) = (depth(a), depth(b));
+        let ancestor_order = da.cmp(&db);
+        while da > db {
+            a = self.parents[a] as usize;
+            da -= 1;
+        }
+        while db > da {
+            b = self.parents[b] as usize;
+            db -= 1;
+        }
+        if a == b {
+            return ancestor_order;
+        }
+        while self.parents[a] != self.parents[b] {
+            a = self.parents[a] as usize;
+            b = self.parents[b] as usize;
+        }
+        self.name_bytes(a).cmp(self.name_bytes(b))
     }
 }
 
@@ -391,7 +418,7 @@ impl Arena {
             return t.alloc[i as usize];
         };
         let (i, previous) = (i as usize, previous as usize);
-        let loser = if t.path_parts(i as u32) < t.path_parts(previous as u32) {
+        let loser = if t.compare_paths(i, previous).is_lt() {
             t.logical[i] = t.logical[previous];
             t.alloc[i] = t.alloc[previous];
             self.hardlinks.insert(key, i as u32);
@@ -922,6 +949,25 @@ mod tests {
             assert_eq!(t.logical[5], 8192);
             finish(t);
             assert_eq!((t.alloc[0], t.logical[0], t.n_files[0]), (4096, 8192, 3));
+        }
+    }
+
+    #[test]
+    fn path_order_matches_materialized_paths() {
+        let mut t = Tree::with_root("/fixture/root with spaces");
+        let mut random = 0x1248_acefu64;
+        for i in 1..500 {
+            random = random.wrapping_mul(6364136223846793005).wrapping_add(1);
+            let parent = if i < 40 { i - 1 } else { (random as usize) % i };
+            let names = ["a", "a-", "a.", "a0", "a_", "é", "日本語", "line\n"];
+            let name = format!("{}{i}", names[(random >> 32) as usize % names.len()]);
+            t.push(&name, parent as u32, 0, 0, true);
+        }
+        let paths: Vec<_> = (0..t.len()).map(|i| t.path(i)).collect();
+        for a in 0..t.len() {
+            for b in 0..t.len() {
+                assert_eq!(t.compare_paths(a, b), paths[a].cmp(&paths[b]), "{a} vs {b}");
+            }
         }
     }
 
