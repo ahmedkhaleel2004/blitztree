@@ -57,6 +57,7 @@ struct UIHandoff {
             for trial in 0..<runs {
                 let bodies = UIHandoffMetrics.rootBodies
                 NSLog("BZ trial %d begin", trial)
+                let metadataStarted = Date()
                 model.startScan(path: CommandLine.arguments[1])
                 var ticks = 0
                 while model.scanning {
@@ -70,9 +71,23 @@ struct UIHandoff {
                 verifyCells(window, model: model)
                 NSLog("BZ trial %d visible nodes=%d", trial, model.tree!.count)
                 if let delay = ProcessInfo.processInfo.environment["BZ_VOLUME_DELAY"].flatMap(Double.init) {
-                    precondition(ticks > Int(delay * 30), "Volume metadata blocked the main actor")
-                    precondition(model.elapsed >= delay - 0.1, "Progress froze while waiting for metadata")
-                    NSLog("BZ delayed metadata: %d responsive main-actor ticks", ticks)
+                    // Tree-first handoff leaves scanning=false while capacity
+                    // is pending. Keep the old reference behavior acceptable
+                    // too: its capacity is already nonzero at this point.
+                    var metadataTicks = 0
+                    if model.freeBytes == 0 {
+                        let waitElapsed = max(0, delay - (-metadataStarted.timeIntervalSinceNow))
+                        let deadline = Date().addingTimeInterval(waitElapsed + 0.5)
+                        while model.freeBytes == 0 && Date() < deadline {
+                            metadataTicks += 1
+                            try? await Task.sleep(for: .milliseconds(10))
+                        }
+                        precondition(model.freeBytes > 0, "Capacity metadata was not applied")
+                        if waitElapsed > 0.2 {
+                            precondition(metadataTicks > Int(waitElapsed * 30), "Volume metadata blocked the main actor")
+                        }
+                    }
+                    NSLog("BZ delayed metadata: %d responsive main-actor ticks; tree was already visible", metadataTicks)
                 }
                 try? await Task.sleep(for: .milliseconds(750))
                 NSLog("BZ trial %d root body evaluations=%d", trial, UIHandoffMetrics.rootBodies - bodies)

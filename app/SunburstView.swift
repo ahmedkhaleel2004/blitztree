@@ -40,6 +40,7 @@ final class SunburstNSView: NSView {
     private var lastRoot: Int = -1
     private var lastTreeID: ObjectIdentifier?
     private var lastShowFree = false
+    private var lastFreeBytes: UInt64 = 0
     private var hoveredSegment: Int?
     private var hoveringCenter = false
     private var sizeFont: NSFont?
@@ -55,6 +56,11 @@ final class SunburstNSView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private var displayedFreeBytes: UInt64 {
+        guard let model, model.showFreeSpace, model.viewRoot == 0 else { return 0 }
+        return model.freeBytes
+    }
+
     override func layout() {
         super.layout()
         relayoutIfNeeded()
@@ -63,7 +69,7 @@ final class SunburstNSView: NSView {
     func relayoutIfNeeded() {
         guard let model, let tree = model.tree else { return }
         if bounds.size != lastSize || model.viewRoot != lastRoot || ObjectIdentifier(tree) != lastTreeID
-            || model.showFreeSpace != lastShowFree {
+            || model.showFreeSpace != lastShowFree || displayedFreeBytes != lastFreeBytes {
             // Zooming crossfades; resizing and rescans just redraw.
             let zoomed = lastTreeID == ObjectIdentifier(tree) && model.viewRoot != lastRoot
             relayout()
@@ -91,13 +97,14 @@ final class SunburstNSView: NSView {
         lastRoot = model.viewRoot
         lastTreeID = ObjectIdentifier(tree)
         lastShowFree = model.showFreeSpace
+        lastFreeBytes = displayedFreeBytes
 
         center = CGPoint(x: bounds.midX, y: bounds.midY)
         radii = Self.ringRadii(outer: min(bounds.width, bounds.height) / 2 - 18)
         let started = Date()
         segments = Self.layout(
             tree: tree, root: model.viewRoot, radii: radii,
-            freeBytes: model.showFreeSpace && model.viewRoot == 0 ? model.freeBytes : 0
+            freeBytes: displayedFreeBytes
         )
         segmentPaths = segments.map { arcPath(ring: $0.ring, start: $0.start, end: $0.end) }
         segmentsByRing = Array(repeating: [], count: radii.count - 1)
@@ -647,6 +654,8 @@ private extension NSFont {
 
 struct SunburstView: NSViewRepresentable {
     let model: ScanModel
+    // A value input makes SwiftUI update this representable when capacity arrives.
+    let freeBytes: UInt64
 
     func makeNSView(context: Context) -> SunburstNSView {
         let v = SunburstNSView()

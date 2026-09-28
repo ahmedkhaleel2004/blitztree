@@ -250,6 +250,56 @@ enum Fmt {
         print("samples,\(label),optimized,\(b.map { String(format: "%.3f", $0) }.joined(separator: ","))")
     }
 
+    static func verifyFreeSpaceUpdates() {
+        let model = ScanModel()
+        let tree = Tree(kind: "balanced")
+        model.tree = tree
+        let frame = CGRect(x: 0, y: 0, width: 480, height: 320)
+        let treemap = TreemapNSView(frame: frame), rings = SunburstNSView(frame: frame)
+        treemap.model = model; rings.model = model
+
+        func check(_ name: String, freeWhenZoomed: Bool, refresh: () -> Void,
+                   rebuild: () -> Void, image: () -> CGImage?) {
+            model.viewRoot = 0; model.showFreeSpace = true; model.freeBytes = 0
+            refresh()
+            // The tree is already visible when capacity arrives, with the
+            // same root, dimensions and display option throughout.
+            for bytes in [tree.alloc[0] / 3, tree.alloc[0], 0] {
+                let before = pixels(image())
+                model.freeBytes = bytes
+                refresh()
+                precondition(pixels(image()) != before, "\(name): stale free-space rendering")
+                let cached = image()!
+                refresh()
+                precondition(image() === cached, "\(name): unchanged capacity rerendered")
+            }
+            // Treemap also shows capacity when zoomed; rings only at the root.
+            // Preserve each view's existing behavior and reuse hidden bitmaps.
+            for (root, showFree) in [(0, false), (Int(tree.children(0)[0]), true)] {
+                model.viewRoot = root; model.showFreeSpace = showFree
+                refresh()
+                let cached = image()!
+                model.freeBytes += tree.alloc[0]
+                refresh()
+                if showFree && freeWhenZoomed {
+                    precondition(pixels(image()) != pixels(cached), "\(name): stale zoomed capacity")
+                } else {
+                    precondition(image() === cached, "\(name): invisible capacity rerendered")
+                }
+                model.viewRoot = 0; model.showFreeSpace = true
+                refresh()
+                let restored = pixels(image())
+                rebuild()
+                precondition(pixels(image()) == restored, "\(name): latest capacity missing on return")
+            }
+        }
+        check("treemap", freeWhenZoomed: true, refresh: { treemap.relayoutIfNeeded() },
+              rebuild: { treemap.relayout() }, image: { treemap.bitmap })
+        check("rings", freeWhenZoomed: false, refresh: { rings.relayoutIfNeeded() },
+              rebuild: { rings.relayout() }, image: { rings.bitmap })
+        print("PASS: delayed capacity, changes/reset and cache reuse in both views")
+    }
+
     static func main() {
         if CommandLine.arguments.contains("--rings-only") {
             for kind in ["balanced", "skewed", "deep", "flat", "empty", "zero", "one_huge"] {
@@ -302,6 +352,7 @@ enum Fmt {
             return
         }
         let onlyCheck = CommandLine.arguments.contains("--check-only")
+        verifyFreeSpaceUpdates()
         verifyCoverage()
         var checks = 0, hitChecks = 0
         var leafHitChecks = 0

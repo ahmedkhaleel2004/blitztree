@@ -30,8 +30,10 @@ struct ContentView: View {
                         }
                         Group {
                             switch model.mapStyle {
-                            case .treemap: TreemapView(model: model)
-                            case .rings: SunburstView(model: model)
+                            case .treemap:
+                                TreemapView(model: model, freeBytes: model.showFreeSpace ? model.freeBytes : 0)
+                            case .rings:
+                                SunburstView(model: model, freeBytes: model.showFreeSpace && model.viewRoot == 0 ? model.freeBytes : 0)
                             }
                         }
                         .frame(minWidth: 400, maxWidth: .infinity)

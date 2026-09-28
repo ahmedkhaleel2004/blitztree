@@ -260,15 +260,21 @@ final class ScanModel {
     private var startedAt: Date?
     private var activity: NSObjectProtocol?
     private var volumeTask: Task<VolumeSpace, Never>?
+    /// Distinguishes a delayed capacity result from the scan that superseded it.
+    private var scanGeneration: UInt64 = 0
 
     func startScan(path: String? = nil) {
         if scanning || cleanupTrash.running { return }
         if let path { scanRoot = path }
+        scanGeneration &+= 1
         tree = nil
         cleanup = []
         viewRoot = 0
         selection = nil
         hovered = nil
+        // Capacity is unknown until the snapshot for this scan arrives.
+        freeBytes = 0
+        unscannedBytes = 0
         files = 0; dirs = 0; bytes = 0; elapsed = 0
         lastPollAt = nil; maxPollGap = 0
         scanning = true
@@ -279,8 +285,8 @@ final class ScanModel {
             reason: "Disk scan"
         )
         // Foundation may ask a disk-management service about purgeable space.
-        // Read it alongside the scan, before publishing the finished tree, so
-        // the main thread never waits synchronously on that service.
+        // Read it alongside the scan; its result is applied after the tree is
+        // visible so a slow service cannot delay the first useful frame.
         let volumePath = scanRoot
         volumeTask = Task.detached(priority: .userInitiated) { VolumeSpace.read(volumePath) }
         handle = bz_scan_start(scanRoot)
@@ -300,12 +306,7 @@ final class ScanModel {
     private var maxPollGap: Double = 0
 
     private func poll() {
-        guard let handle else {
-            // A slow volume-space service must not freeze progress while the
-            // already finished tree waits for its matching volume snapshot.
-            if scanning { elapsed = -(startedAt?.timeIntervalSinceNow ?? 0) }
-            return
-        }
+        guard let handle else { return }
         if let last = lastPollAt { maxPollGap = max(maxPollGap, -last.timeIntervalSinceNow) }
         lastPollAt = Date()
         var f: UInt64 = 0, d: UInt64 = 0, b: UInt64 = 0
@@ -315,19 +316,24 @@ final class ScanModel {
         elapsed = -(startedAt?.timeIntervalSinceNow ?? 0)
         if done != 0 {
             let doneAt = Date()
+            let generation = scanGeneration
             let result = Tree(handle: handle)
             self.handle = nil
             if result == nil { bz_free(handle) }
             let pendingVolume = volumeTask
             volumeTask = nil
-            Task {
+            finishScan(result, generation: generation, doneAt: doneAt)
+            Task { [weak self] in
                 let space = await pendingVolume?.value ?? VolumeSpace(free: nil, used: nil)
-                finishScan(result, space: space, doneAt: doneAt)
+                // The generation identifies the scan; do not capture `result`
+                // here, or a large tree would live for the whole volume query.
+                self?.applyVolume(space, generation: generation)
             }
         }
     }
 
-    private func finishScan(_ result: Tree?, space: VolumeSpace, doneAt: Date) {
+    private func finishScan(_ result: Tree?, generation: UInt64, doneAt: Date) {
+        guard generation == scanGeneration else { return }
         timer?.invalidate()
         timer = nil
         tree = result
@@ -352,19 +358,25 @@ final class ScanModel {
             }
             NSLog("BZ scan done: %llu nodes, %llu unreadable dirs", UInt64(tree.count), tree.errors)
         }
+        if let activity { ProcessInfo.processInfo.endActivity(activity) }
+        activity = nil
+    }
+
+    /// Applies capacity only to the tree and scan generation that requested it.
+    /// A rescan may finish while an older volume service call is still pending.
+    private func applyVolume(_ space: VolumeSpace, generation: UInt64) {
+        guard generation == scanGeneration, let tree else { return }
         freeBytes = space.free ?? 0
         // Coverage honesty: compare scanned bytes with what the volume
         // says it holds. The difference is root-only space (Spotlight
         // index, unified logs, …) no unelevated app can read.
         unscannedBytes = 0
-        if let tree, let used = space.used {
+        if let used = space.used {
             let seen = tree.alloc[0]
             if used > seen {
                 unscannedBytes = used - seen
             }
         }
-        if let activity { ProcessInfo.processInfo.endActivity(activity) }
-        activity = nil
     }
 }
 

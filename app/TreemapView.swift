@@ -28,6 +28,12 @@ final class TreemapNSView: NSView {
     private var lastRoot: Int = -1
     private var lastTreeID: ObjectIdentifier?
     private var lastShowFree = false
+    private var lastFreeBytes: UInt64 = 0
+
+    private var displayedFreeBytes: UInt64 {
+        guard let model, model.showFreeSpace else { return 0 }
+        return model.freeBytes
+    }
 
     override var isFlipped: Bool { true }
 
@@ -40,7 +46,7 @@ final class TreemapNSView: NSView {
         guard let model, let tree = model.tree else { return }
         let treeID = ObjectIdentifier(tree)
         if bounds.size != lastSize || model.viewRoot != lastRoot || treeID != lastTreeID
-            || model.showFreeSpace != lastShowFree {
+            || model.showFreeSpace != lastShowFree || displayedFreeBytes != lastFreeBytes {
             relayout()
         }
     }
@@ -58,6 +64,7 @@ final class TreemapNSView: NSView {
         lastRoot = model.viewRoot
         lastTreeID = ObjectIdentifier(tree)
         lastShowFree = model.showFreeSpace
+        lastFreeBytes = displayedFreeBytes
 
         rects.removeAll(keepingCapacity: true)
         leaves.removeAll(keepingCapacity: true)
@@ -564,6 +571,8 @@ final class NodeMenu: NSObject {
 
 struct TreemapView: NSViewRepresentable {
     let model: ScanModel
+    // A value input makes SwiftUI update this representable when capacity arrives.
+    let freeBytes: UInt64
 
     func makeNSView(context: Context) -> TreemapNSView {
         let v = TreemapNSView()
