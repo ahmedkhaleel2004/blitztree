@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 import Observation
 
-/// A folder that is safe to delete because a tool rebuilds or re-downloads
-/// it on demand: package installs, build output, caches.
+/// A recognized build or cache folder. Eligibility is checked separately from
+/// recognition, then revalidated immediately before moving it.
 nonisolated struct CleanupItem: Identifiable, Sendable {
     let node: Int
     let path: String
@@ -11,6 +11,19 @@ nonisolated struct CleanupItem: Identifiable, Sendable {
     let kind: String
     let bytes: UInt64
     var id: Int { node }
+    let target: CleanupTarget?
+    let blocked: String?
+
+    init(node: Int, path: String, display: String, kind: String, bytes: UInt64, root: String = NSHomeDirectory()) {
+        self.node = node; self.path = path; self.display = display; self.kind = kind; self.bytes = bytes
+        do {
+            self.target = try CleanupPathSafety.capture(path: path, root: root)
+            self.blocked = nil
+        } catch {
+            self.target = nil
+            self.blocked = error.localizedDescription
+        }
+    }
 }
 
 nonisolated enum Cleanup {
@@ -24,7 +37,7 @@ nonisolated enum Cleanup {
             var display = tree.displayPath(node)
             if display.hasPrefix(home) { display = "~" + display.dropFirst(home.count) }
             return CleanupItem(node: node, path: path, display: display,
-                               kind: tree.cleanupDescription(index), bytes: tree.alloc[node])
+                               kind: tree.cleanupDescription(index), bytes: tree.alloc[node], root: tree.path(0))
         }
     }
 }
@@ -49,7 +62,10 @@ final class CleanupTrashBatch {
                 var failed: [String] = []
                 for item in items {
                     do {
-                        try FileManager.default.trashItem(at: URL(fileURLWithPath: item.path), resultingItemURL: nil)
+                        guard let target = item.target else {
+                            throw CleanupOperations.failure("This folder could not be validated; rescan before cleaning")
+                        }
+                        _ = try CleanupOperations.trash(target)
                     } catch {
                         failed.append("\(item.display): \(error.localizedDescription)")
                     }
@@ -72,7 +88,7 @@ struct CleanupPanel: View {
 
     private var agent: InstalledAgent? { model.preferredAgent }
 
-    private var pickedItems: [CleanupItem] { model.cleanup.filter { picked.contains($0.id) } }
+    private var pickedItems: [CleanupItem] { model.cleanup.filter { picked.contains($0.id) && $0.target != nil } }
     private var pickedBytes: UInt64 { pickedItems.reduce(0) { $0 + $1.bytes } }
     private var totalBytes: UInt64 { model.cleanup.reduce(0) { $0 + $1.bytes } }
 
@@ -122,6 +138,7 @@ struct CleanupPanel: View {
                     ))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
+                    .disabled(item.target == nil)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.display)
                             .lineLimit(1)
@@ -129,6 +146,11 @@ struct CleanupPanel: View {
                         Text(item.kind)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let blocked = item.blocked {
+                            Text(blocked)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                     Spacer(minLength: 4)
                     Text(Fmt.size(item.bytes))
@@ -358,7 +380,8 @@ private struct AgentRunView: View {
         case .trashing: "Moving to the Trash"
         case .staged: "In the Trash"
         case .deleting: "Deleting"
-        case .done: "All clean"
+        case .done: run.items.contains { if case .failed = $0.status { true } else { false } }
+            ? "Cleanup incomplete" : "All clean"
         case .failed: "\(run.agent.kind.name) couldn't finish"
         }
     }

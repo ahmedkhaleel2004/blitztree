@@ -241,7 +241,7 @@ final class AgentSetup {
 
 // MARK: - The plan
 
-nonisolated struct PlanItemSpec: Decodable, Sendable {
+nonisolated struct PlanItemSpec: Decodable, Sendable, Equatable {
     let title: String
     let detail: String
     let group: String
@@ -355,81 +355,21 @@ nonisolated enum CodexSessions {
 nonisolated enum CleanupGuard {
     static let home = NSHomeDirectory()
 
-    /// Folders BlitzTree never cleans, whatever the agent says.
-    static let protected = [
-        "Documents", "Desktop", "Pictures", "Movies", "Music", ".ssh", ".gnupg", ".Trash",
-        "Library/Mobile Documents", "Library/Mail", "Library/Messages", "Library/Keychains",
-        "Library/Photos", "Library/CloudStorage",
-    ].map { home + "/" + $0 }
+    static var rebuildable: Set<String> { CleanupPathSafety.rebuildable }
 
-    /// Build output and installs that a tool recreates, allowed even inside a
-    /// protected folder (a project in ~/Documents still has a node_modules).
-    static let rebuildable: Set<String> = [
-        "node_modules", ".venv", "venv", "target", ".next", ".turbo", ".nuxt", ".svelte-kit",
-        "__pycache__", ".pytest_cache", ".mypy_cache", ".ruff_cache", "DerivedData", ".gradle",
-        ".parcel-cache", ".expo", "Pods",
-    ]
-
-    /// Folders that hold other apps' live data: only named subfolders go.
-    static let tooBroad: Set<String> = [
-        "Library", "Library/Caches", "Library/Application Support", "Library/Containers",
-        "Library/Group Containers", "Library/Developer", "Library/Preferences", ".config", ".cache",
-        "Library/Developer/CoreSimulator", "Library/Developer/CoreSimulator/Devices",
-        ".local", ".local/share", "Downloads",
-    ].reduce(into: []) { $0.insert(home + "/" + $1) }
-
-    /// The only commands BlitzTree runs: each tool's own cleanup.
-    static let commands = [
-        "uv cache clean", "uv cache prune", "bun pm cache rm", "npm cache clean", "pnpm store prune",
-        "yarn cache clean", "brew cleanup", "brew autoremove", "docker system prune",
-        "docker image prune", "docker builder prune", "docker container prune",
-        "xcrun simctl delete unavailable", "xcrun simctl runtime delete", "xcrun simctl erase",
-        "pip cache purge", "pip3 cache purge", "ollama rm ", "go clean -cache", "go clean -modcache",
-        "gem cleanup", "pod cache clean", "conda clean", "mamba clean",
-    ]
-
-    /// Why a path may not be touched, or nil when it may.
     static func blockReason(path: String) -> String? {
-        let p = (path as NSString).standardizingPath
-        guard p.hasPrefix(home + "/") else { return "Outside your home folder" }
-        let rel = p.dropFirst(home.count + 1)
-        guard rel.split(separator: "/").count >= 2 || rel.hasPrefix("."), !tooBroad.contains(p) else {
-            return "Too broad: other apps keep live data here"
-        }
-        for dir in protected where p == dir || p.hasPrefix(dir + "/") {
-            // Projects live in Documents too; their build output is still fair
-            // game, and so are Codex's chat folders (the user decides those).
-            let allowed = rebuildable.contains((p as NSString).lastPathComponent) || codexChat(p) != nil
-            if !allowed || dir.hasSuffix(".Trash") {
-                return "In ~/\(dir.dropFirst(home.count + 1)), which BlitzTree never cleans"
-            }
-        }
-        if FileManager.default.fileExists(atPath: p + "/.git") { return "A git repository" }
-        // Apple's own app data refuses to move and is rebuilt by macOS anyway.
-        if p.contains("/Library/Containers/com.apple.") || p.contains("/Library/Caches/com.apple.")
-            || p.contains("/Library/Group Containers/group.com.apple.") { return "Managed by macOS" }
-        return nil
+        do { _ = try CleanupPathSafety.capture(path: path); return nil }
+        catch { return error.localizedDescription }
     }
 
     static func blockReason(command: String) -> String? {
-        let c = command.trimmingCharacters(in: .whitespaces)
-        guard commands.contains(where: { c == $0.trimmingCharacters(in: .whitespaces) || c.hasPrefix($0.hasSuffix(" ") ? $0 : $0 + " ") }) else {
-            return "BlitzTree only runs tools' own cleanup commands"
-        }
-        let banned = [";", "|", "&", ">", "<", "`", "$", "\n", "*", "\\"]
-        if banned.contains(where: { c.contains($0) }) { return "Command not allowed" }
-        return nil
+        CleanupCommand.parse(command) == nil ? "Command or arguments not allowed" : nil
     }
 
     /// The Codex app keeps each chat's files in ~/Documents/Codex/<date>/<chat>
     /// (outputs, work). Returns that chat folder for a path at or inside one.
     static func codexChat(_ path: String) -> String? {
-        let root = home + "/Documents/Codex/"
-        let p = (path as NSString).standardizingPath
-        guard p.hasPrefix(root) else { return nil }
-        let parts = p.dropFirst(root.count).split(separator: "/")
-        guard parts.count >= 2, parts[0].wholeMatch(of: /\d{4}-\d{2}-\d{2}/) != nil else { return nil }
-        return root + parts[0] + "/" + parts[1]
+        CleanupPathSafety.codexChat(path)
     }
 
     /// Whether the project owning this build folder was used in the last two
@@ -500,10 +440,12 @@ final class PlanItem: Identifiable {
     /// Space this item gave back to the disk (commands, emptied Trash).
     var freed: UInt64 = 0
     /// Where its folders went in the Trash, for "Empty Trash".
-    var trashed: [URL] = []
+    var trashed: [CleanupReceipt] = []
+    let cleanupTargets: [CleanupTarget]
     var trashedBytes: UInt64 = 0
+    var stagingError: String?
 
-    /// Size from the scan where it can be measured, else the agent's figure.
+    /// Measured size from the scan; never trust a size supplied by the agent.
     let bytes: UInt64
     /// Its folders in the scan the plan was made from, for the treemap.
     let nodes: [Int]
@@ -513,77 +455,121 @@ final class PlanItem: Identifiable {
     /// A tool cache that is only a folder: trashed and deleted like one.
     let viaTrash: Bool
 
-    init(spec: PlanItemSpec, tree: Tree) {
+    init(spec: PlanItemSpec, tree: Tree, home: String = NSHomeDirectory()) {
         self.spec = spec
         var asked = spec.paths.map { ($0 as NSString).expandingTildeInPath }
-        // A known tool cache named without its folder: use the standard one,
-        // so its size is measured instead of guessed.
-        if spec.action == "command", asked.isEmpty {
-            let home = NSHomeDirectory()
-            let known: [(String, String)] = [
-                ("uv cache", "\(home)/.cache/uv"), ("npm cache", "\(home)/.npm/_cacache"),
-                ("bun pm cache", "\(home)/.bun/install/cache"), ("pip cache", "\(home)/Library/Caches/pip"),
-                ("pip3 cache", "\(home)/Library/Caches/pip"), ("yarn cache", "\(home)/Library/Caches/Yarn"),
-            ]
-            if let hit = known.first(where: { spec.command.hasPrefix($0.0) }) { asked = [hit.1] }
-        }
+        let command = spec.action == "command" ? CleanupCommand.parse(spec.command) : nil
         var reason: String?
-        var kept: [String] = []
-        var recent = 0
-        // A cache that is just a folder goes through the Trash and BlitzTree's
-        // parallel delete: reversible in step one, and faster than the tool's
-        // own single-threaded removal (bun took 20 s for 5 GB).
-        let plainCache = ["bun pm cache rm", "npm cache clean", "uv cache clean", "pip cache purge",
-                          "pip3 cache purge", "yarn cache clean"]
-        let trashable = spec.action == "command" && !asked.isEmpty
-            && plainCache.contains { spec.command.hasPrefix($0) }
-            && asked.allSatisfy { CleanupGuard.blockReason(path: $0) == nil && FileManager.default.fileExists(atPath: $0) }
-        viaTrash = trashable
-        if spec.action == "command" && !trashable {
-            reason = CleanupGuard.blockReason(command: spec.command)
-            // A tool cache whose folders are all gone has nothing left to clear.
-            if reason == nil, !asked.isEmpty, asked.allSatisfy({ !FileManager.default.fileExists(atPath: $0) }) {
-                reason = "Already clean"
-            }
-            kept = asked
-        } else if asked.isEmpty {
-            reason = "Nothing to remove"
-        } else {
-            // Paths BlitzTree won't touch are dropped; the card is blocked only
-            // when nothing is left.
+        var folderCache = false
+        if !["trash", "command"].contains(spec.action) {
+            reason = "Unknown cleanup action"
+        } else if spec.action == "trash", !spec.command.isEmpty {
+            reason = "A Trash action cannot contain a command"
+        } else if spec.action == "command" {
+            if let command {
+                if let relative = command.cacheRelativePath {
+                    let expected = home + "/" + relative
+                    // The command selects its own known folder. Model paths
+                    // cannot redirect a cache command into arbitrary deletion.
+                    if asked.isEmpty { asked = [expected] }
+                    do {
+                        let target = try CleanupPathSafety.capture(path: expected, root: home, home: home)
+                        let supplied = try asked.map {
+                            try CleanupPathSafety.capture(path: $0, root: home, home: home).identity
+                        }
+                        guard Set(supplied) == [target.identity] else {
+                            throw CleanupOperations.failure("The supplied paths do not match this tool's cache")
+                        }
+                        asked = [target.path]
+                        folderCache = true
+                    } catch { reason = error.localizedDescription }
+                }
+            } else { reason = "Command or arguments not allowed" }
+        }
+        viaTrash = folderCache
+        var kept: [CleanupTarget] = []
+        var excluded = 0
+        var firstExclusion: String?
+        if reason == nil && (spec.action == "trash" || folderCache) {
+            if asked.isEmpty { reason = "Nothing to remove" }
             for path in asked {
-                if let why = CleanupGuard.blockReason(path: path) {
-                    reason = reason ?? why
-                } else if CleanupGuard.codexChat(path) == nil, let app = CleanupGuard.runningOwner(of: [path]) {
-                    reason = reason ?? "Quit \(app) to clean this"
-                } else if !FileManager.default.fileExists(atPath: path) {
-                    reason = reason ?? "Already gone"
-                } else if CleanupGuard.recentlyUsed(path) {
-                    // Never break what the user is working on right now.
-                    recent += 1
-                    reason = reason ?? (CleanupGuard.codexChat(path) != nil
-                        ? "A Codex chat you used in the last 2 days" : "In projects you used in the last 2 days")
-                } else {
-                    kept.append(path)
+                do {
+                    let target = try CleanupPathSafety.capture(path: path, root: home, home: home)
+                    guard let node = tree.node(at: target.path), node != 0 else {
+                        throw CleanupOperations.failure("Path is not an item in this scan")
+                    }
+                    if folderCache && !tree.isDir(node) {
+                        throw CleanupOperations.failure("The cache path is not a scanned directory")
+                    }
+                    if CleanupGuard.codexChat(target.path) == nil,
+                       let app = CleanupGuard.runningOwner(of: [target.path]) {
+                        throw CleanupOperations.failure("Quit \(app) to clean this")
+                    }
+                    if CleanupGuard.recentlyUsed(target.path) {
+                        throw CleanupOperations.failure(CleanupGuard.codexChat(target.path) != nil
+                            ? "A Codex chat you used in the last 2 days" : "In a project used in the last 2 days")
+                    }
+                    kept.append(target)
+                } catch {
+                    excluded += 1
+                    firstExclusion = firstExclusion ?? error.localizedDescription
                 }
             }
-            if !kept.isEmpty { reason = nil }
+            if kept.isEmpty { reason = reason ?? firstExclusion ?? "Nothing to remove" }
+        } else if reason == nil && spec.action == "command" {
+            // Paths only describe a tool command. They never become deletion
+            // targets, but must still belong to the scan being reviewed.
+            if asked.isEmpty || asked.contains(where: { tree.node(at: $0).map { $0 == 0 } ?? true }) {
+                reason = "A supplied path is not in this scan"
+            } else if let app = CleanupGuard.runningOwner(of: asked) {
+                reason = "Quit \(app) to clean this"
+            }
         }
-        paths = kept.isEmpty ? asked : kept
+        let candidateNodes = Set(kept.compactMap { tree.node(at: $0.path) })
+        let outer = candidateNodes.filter { node in
+            !tree.ancestry(node).dropLast().contains(where: candidateNodes.contains)
+        }
+        cleanupTargets = kept.filter { target in tree.node(at: target.path).map(outer.contains) ?? false }
+            .reduce(into: []) { targets, target in
+                if !targets.contains(where: { $0.identity == target.identity }) { targets.append(target) }
+            }
+        paths = spec.action == "command" && !folderCache ? asked : cleanupTargets.map(\.path)
         blocked = reason
-        selected = reason == nil && spec.group == "safe"
-        note = recent > 0 && !kept.isEmpty
-            ? "Keeps \(recent) project\(recent == 1 ? "" : "s") you used in the last 2 days" : nil
-
-        // Measured sizes, not counting a path inside another listed one twice.
+        selected = reason == nil && spec.group == "safe" && (spec.action == "trash" || folderCache)
+        if spec.action == "command" && !folderCache && reason == nil {
+            note = "Runs the tool's cleanup, which may affect data outside the listed paths"
+        } else {
+            note = excluded > 0 && !kept.isEmpty
+                ? "Leaves \(excluded) path(s) unchanged: \(firstExclusion ?? "not eligible")" : nil
+        }
         let nodes = Set(paths.compactMap { tree.node(at: $0) })
-        let outer = nodes.filter { node in !tree.ancestry(node).dropLast().contains(where: nodes.contains) }
-        let measured = outer.reduce(UInt64(0)) { $0 + tree.alloc[$1] }
-        self.nodes = Array(outer)
-        bytes = measured > 0 ? measured : UInt64(max(0, spec.bytes))
+        self.nodes = Array(nodes.filter { node in !tree.ancestry(node).dropLast().contains(where: nodes.contains) })
+        let measured = self.nodes.reduce(UInt64(0)) { $0 + tree.alloc[$1] }
+        bytes = measured
     }
 
     var isCommand: Bool { spec.action == "command" && !viaTrash }
+
+    /// Keep running commands visible in the countdown; folder sizes only
+    /// include actual Trash moves, including receipts retained after failure.
+    var pendingBytes: UInt64 {
+        if isCommand { return status == .waiting || status == .running ? bytes : 0 }
+        return trashedBytes
+    }
+
+    /// Retain a reviewed action and its captured identities only when its full
+    /// specification is unchanged. New or changed final actions need selection.
+    static func reconcile(_ specs: [PlanItemSpec], previous: [PlanItem], tree: Tree) -> [PlanItem] {
+        var remaining = previous
+        return specs.map { spec in
+            if let index = remaining.firstIndex(where: { $0.spec == spec }) {
+                return remaining.remove(at: index)
+            }
+            let fresh = PlanItem(spec: spec, tree: tree)
+            fresh.selected = false
+            return fresh
+        }
+    }
 }
 
 @Observable
@@ -645,10 +631,7 @@ final class AgentRun {
     /// What step two deletes for good; while it runs, what is still going,
     /// so the number counts down as each item finishes.
     var pendingBytes: UInt64 {
-        targets.filter {
-            $0.status == .inTrash || ($0.isCommand && $0.status == .waiting)
-                || (phase == .deleting && $0.status == .running)
-        }.reduce(0) { $0 + $1.bytes }
+        targets.reduce(0) { $0 + $1.pendingBytes }
     }
     /// The items the user chose and BlitzTree may touch.
     var targets: [PlanItem] { items.filter { $0.selected && $0.blocked == nil } }
@@ -775,8 +758,10 @@ final class AgentRun {
             self.summary = summary
             // The final JSON is authoritative; keep the cards already shown
             // (and their checkboxes) when they match.
-            if specs.map(\.title) != items.map(\.spec.title) {
-                withAnimation(.snappy) { items = specs.map { PlanItem(spec: $0, tree: tree) } }
+            if specs != items.map(\.spec) {
+                withAnimation(.snappy) {
+                    items = PlanItem.reconcile(specs, previous: items, tree: tree)
+                }
             }
             finishPlanning()
         case .failed(let message):
@@ -821,13 +806,16 @@ final class AgentRun {
             // Moving to the Trash is a rename; all of them at once, off the main thread.
             await withTaskGroup(of: Void.self) { group in
                 for item in work {
-                    let paths = item.paths
+                    let paths = item.cleanupTargets
                     let dryRun = dryRun
                     group.addTask {
-                        let result = dryRun ? (moved: [URL](), error: String?.none) : await Self.trash(paths)
+                        let result = dryRun ? (moved: [CleanupReceipt](), error: String?.none) : await Self.trash(paths)
                         await MainActor.run {
                             item.trashed = result.moved
-                            item.trashedBytes = dryRun || !result.moved.isEmpty ? item.bytes : 0
+                            item.stagingError = result.error
+                            item.trashedBytes = dryRun ? item.bytes : result.moved.reduce(UInt64(0)) { total, receipt in
+                                total + (self.tree.node(at: receipt.sourcePath).map { self.tree.alloc[$0] } ?? 0)
+                            }
                             withAnimation(.snappy) { item.status = result.error.map { .failed($0) } ?? .inTrash }
                         }
                     }
@@ -843,7 +831,7 @@ final class AgentRun {
     func deleteForGood(env: AgentEnvironment) {
         guard phase == .staged else { return }
         phase = .deleting
-        let work = targets.filter { $0.status == .inTrash || ($0.isCommand && $0.status == .waiting) }
+        let work = targets.filter { $0.status == .inTrash || !$0.trashed.isEmpty || ($0.isCommand && $0.status == .waiting) }
         for item in work { item.status = .running }
         let before = Self.freeBytes()
         Task {
@@ -853,8 +841,10 @@ final class AgentRun {
                     let command = item.isCommand ? item.spec.command : nil
                     let bytes = item.bytes
                     let dryRun = dryRun
+                    let stagedBytes = item.isCommand ? item.bytes : item.trashedBytes
                     group.addTask {
                         var error: String?
+                        var remaining: [CleanupReceipt] = []
                         if dryRun {
                             // Roughly as long as the real delete: bigger items finish later.
                             let gb = Double(bytes) / 1e9
@@ -862,13 +852,20 @@ final class AgentRun {
                         } else if let command {
                             error = await Self.runCommand(command, path: env.path)
                         } else {
-                            await Self.remove(urls)
+                            let result = await CleanupOperations.remove(urls)
+                            remaining = result.remaining
+                            if !result.errors.isEmpty { error = result.errors.joined(separator: "\n") }
                         }
+                        let failedReceipts = remaining
                         await MainActor.run {
-                            item.trashed = []
-                            item.trashedBytes = 0
-                            if error == nil { item.freed = item.bytes }
-                            withAnimation(.snappy) { item.status = error.map { .failed($0) } ?? .done }
+                            item.trashed = failedReceipts
+                            item.trashedBytes = failedReceipts.reduce(UInt64(0)) { total, receipt in
+                                total + (self.tree.node(at: receipt.sourcePath).map { self.tree.alloc[$0] } ?? 0)
+                            }
+                            if error == nil { item.freed = stagedBytes }
+                            withAnimation(.snappy) {
+                                item.status = (error ?? item.stagingError).map { .failed($0) } ?? .done
+                            }
                         }
                     }
                 }
@@ -891,53 +888,17 @@ final class AgentRun {
         }
     }
 
-    /// Moves paths to the Trash; returns where they went and the first error.
-    nonisolated static func trash(_ paths: [String]) async -> (moved: [URL], error: String?) {
+    /// Revalidate captured targets at the actual operation boundary.
+    nonisolated static func trash(_ targets: [CleanupTarget]) async -> (moved: [CleanupReceipt], error: String?) {
         await Task.detached(priority: .userInitiated) {
-            var moved: [URL] = []
-            var error: String?
-            for path in paths where FileManager.default.fileExists(atPath: path) {
-                do {
-                    var out: NSURL?
-                    try FileManager.default.trashItem(at: URL(fileURLWithPath: path), resultingItemURL: &out)
-                    if let out { moved.append(out as URL) }
-                } catch let failure {
-                    error = error ?? failure.localizedDescription
-                }
+            var moved: [CleanupReceipt] = []
+            var errors: [String] = []
+            for target in targets {
+                do { moved.append(try CleanupOperations.trash(target)) }
+                catch { errors.append("\(target.path): \(error.localizedDescription)") }
             }
-            return (moved, error)
+            return (moved, errors.isEmpty ? nil : errors.joined(separator: "\n"))
         }.value
-    }
-
-    /// Four deletes at a time across the whole run: measured on APFS, 4
-    /// threads remove a 100k-file node_modules 2x faster than `rm -rf`, and
-    /// more threads only contend (8 and 16 were slower).
-    nonisolated private static let deleteSlots = DispatchSemaphore(value: 4)
-    nonisolated private static let deleteQueue = DispatchQueue(label: "blitztree.delete", qos: .userInitiated,
-                                                               attributes: .concurrent)
-
-    /// Deletes folders for good, fast: each folder's children go through
-    /// removefile(3) on the shared slots, then the folder itself.
-    nonisolated static func remove(_ urls: [URL]) async {
-        await withCheckedContinuation { (done: CheckedContinuation<Void, Never>) in
-            deleteQueue.async {
-                let group = DispatchGroup()
-                for url in urls {
-                    for kid in (try? FileManager.default.contentsOfDirectory(atPath: url.path)) ?? [] {
-                        deleteSlots.wait()
-                        group.enter()
-                        deleteQueue.async {
-                            _ = removefile(url.appendingPathComponent(kid).path, nil, removefile_flags_t(REMOVEFILE_RECURSIVE))
-                            deleteSlots.signal()
-                            group.leave()
-                        }
-                    }
-                }
-                group.wait()
-                for url in urls { _ = removefile(url.path, nil, removefile_flags_t(REMOVEFILE_RECURSIVE)) }
-                done.resume()
-            }
-        }
     }
 
     /// Plain available space (statfs), exact to the block.
@@ -950,9 +911,15 @@ final class AgentRun {
     /// Runs a vetted cleanup command; returns an error message on failure.
     nonisolated static func runCommand(_ command: String, path: String) async -> String? {
         await Task.detached(priority: .userInitiated) {
+            guard let vetted = CleanupCommand.parse(command) else { return "Command or arguments not allowed" }
+            let executable = path.split(separator: ":", omittingEmptySubsequences: false)
+                .filter { $0.hasPrefix("/") }
+                .map { URL(fileURLWithPath: String($0)).appendingPathComponent(vetted.executable) }
+                .first { FileManager.default.isExecutableFile(atPath: $0.path) }
+            guard let executable else { return "Cleanup tool not found in an absolute PATH directory" }
             let process = Process()
-            process.executableURL = URL(fileURLWithPath: "/bin/zsh")
-            process.arguments = ["-c", command]
+            process.executableURL = executable
+            process.arguments = vetted.arguments
             var environment = ProcessInfo.processInfo.environment
             environment["PATH"] = path
             process.environment = environment
@@ -1260,12 +1227,8 @@ nonisolated enum AgentPrompt {
           - paths: the absolute paths it covers.
           - action: "command" when the owning tool has its own cleanup and the item is that tool's \
         cache, otherwise "trash" (BlitzTree moves the paths to the Trash itself). BlitzTree only runs \
-        commands starting with one of: `uv cache clean`, `bun pm cache rm`, `npm cache clean --force`, \
-        `pnpm store prune`, `yarn cache clean`, `brew cleanup --prune=all`, `docker system prune -f`, \
-        `docker builder prune -f`, `xcrun simctl delete unavailable`, `xcrun simctl runtime delete <id>`, \
-        `xcrun simctl erase <udid>`, `pip cache purge`, `ollama rm <model>`, `go clean -modcache`, \
-        `gem cleanup`, `pod cache clean --all`, `conda clean -a -y`. Nothing else, no pipes, `;`, `$` or \
-        globs; it must not prompt.
+        these exact commands: \(CleanupCommand.promptExamples). No additional options or paths, \
+        shell syntax or globbing; the command must not prompt.
           - command: the exact command for "command", "" for "trash".
         `npm cache clean` only empties ~/.npm/_cacache; ~/.npm/_npx is a separate "trash" item. Only \
         list caches that appear in the tables above with their real size; skip ones that are not there.
@@ -1421,9 +1384,12 @@ extension Tree {
     /// The node at an absolute path, if the scan covered it.
     nonisolated func node(at path: String) -> Int? {
         let root = self.path(0)
-        var p = (path as NSString).standardizingPath
+        guard var p = try? CleanupPathSafety.normalize(path) else { return nil }
         // A whole-disk scan is rooted at the Data volume; /Users/… lives there.
-        if root == "/System/Volumes/Data", !p.hasPrefix(root + "/") { p = root + p }
+        let data = "/System/Volumes/Data"
+        if root == data || root.hasPrefix(data + "/") {
+            if p != data && !p.hasPrefix(data + "/") { p = data + p }
+        } else if p.hasPrefix(data + "/") { p = String(p.dropFirst(data.count)) }
         guard p == root || p.hasPrefix(root == "/" ? "/" : root + "/") else { return nil }
         var cur = 0
         for part in p.dropFirst(root.count).split(separator: "/") {

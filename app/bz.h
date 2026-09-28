@@ -3,6 +3,7 @@
 #define BZ_H
 
 #include <stdint.h>
+#include <removefile.h>
 
 typedef struct BzScan BzScan;
 

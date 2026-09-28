@@ -7,7 +7,7 @@ trap 'rm -rf "$UI_BENCH_TMP"' EXIT
 # Freeze the source set while other audit work may still edit shared files.
 mkdir "$UI_BENCH_TMP/app"
 cp app/*.swift "$UI_BENCH_TMP/app/"
-shasum -a 256 "$UI_BENCH_TMP/app/Cleanup.swift" "$UI_BENCH_TMP/app/Model.swift" "$UI_BENCH_TMP/app/ContentView.swift"
+shasum -a 256 "$UI_BENCH_TMP/app/Cleanup.swift" "$UI_BENCH_TMP/app/CleanupCommand.swift" "$UI_BENCH_TMP/app/CleanupSafety.swift" "$UI_BENCH_TMP/app/CleanupOperations.swift" "$UI_BENCH_TMP/app/Model.swift" "$UI_BENCH_TMP/app/ContentView.swift"
 UI_BENCH_INPUTS=(benchmarks/UIPerformance.swift)
 UI_BENCH_LINK=()
 UI_BENCH_HEADER=benchmarks/ui_fixture.h
@@ -23,6 +23,8 @@ else
   UI_BENCH_INPUTS+=("$UI_BENCH_TMP/fixture.o")
 fi
 swiftc "$UI_BENCH_TMP/app/Agent.swift" "$UI_BENCH_TMP/app/Cleanup.swift" \
+  "$UI_BENCH_TMP/app/CleanupCommand.swift" "$UI_BENCH_TMP/app/CleanupSafety.swift" \
+  "$UI_BENCH_TMP/app/CleanupOperations.swift" \
   "$UI_BENCH_TMP/app/ContentView.swift" "$UI_BENCH_TMP/app/Model.swift" \
   "$UI_BENCH_TMP/app/Treemap.swift" "$UI_BENCH_TMP/app/TreemapView.swift" "$UI_BENCH_TMP/app/SunburstView.swift" \
   "${UI_BENCH_INPUTS[@]}" benchmarks/UIReferenceCleanup.swift "${UI_BENCH_LINK[@]}" \
