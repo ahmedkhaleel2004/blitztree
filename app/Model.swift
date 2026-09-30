@@ -401,4 +401,13 @@ nonisolated func volumeUsedBytes(_ path: String) -> UInt64? {
 nonisolated enum Fmt {
     static func size(_ b: UInt64) -> String { Int64(b).formatted(.byteCount(style: .file)) }
     static func num(_ n: UInt64) -> String { n.formatted() }
+    /// Like `size`, but always two decimals, so a live counter keeps its width
+    /// instead of jumping as trailing zeros drop ("225.5 GB" → "225.57 GB").
+    static func fixedSize(_ b: UInt64) -> String {
+        let units = ["KB", "MB", "GB", "TB", "PB"]
+        guard b >= 1000 else { return size(b) }
+        var v = Double(b) / 1000, i = 0
+        while v >= 999.995, i < units.count - 1 { v /= 1000; i += 1 }
+        return "\(v.formatted(.number.precision(.fractionLength(2)).grouping(.never))) \(units[i])"
+    }
 }
