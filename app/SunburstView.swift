@@ -1,4 +1,5 @@
 import AppKit
+import CoreText
 import QuartzCore
 import SwiftUI
 
@@ -43,7 +44,7 @@ final class SunburstNSView: NSView {
     private var hoveredSegment: Int?
     private var hoveringCenter = false
     private var sizeFont: NSFont?
-    private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .medium)
+    private static let titleFont = NSFont.systemFont(ofSize: 12, weight: .medium).tabularDigits()
     private static let detailFont = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
 
     override var isFlipped: Bool { true }
@@ -470,7 +471,7 @@ final class SunburstNSView: NSView {
         // A new rounded font every frame had AppKit look up a font instance
         // (disk included) on each hover; it only changes with the window size.
         let sizePt = min(26, max(15, radii[0] / 4.2))
-        if sizeFont?.pointSize != sizePt { sizeFont = NSFont.systemFont(ofSize: sizePt, weight: .semibold).rounded() }
+        if sizeFont?.pointSize != sizePt { sizeFont = NSFont.systemFont(ofSize: sizePt, weight: .semibold).rounded().tabularDigits() }
         let lines: [NSAttributedString] = [
             NSAttributedString(string: title, attributes: [
                 .font: Self.titleFont,
@@ -641,6 +642,15 @@ final class SunburstNSView: NSView {
 private extension NSFont {
     func rounded() -> NSFont {
         guard let d = fontDescriptor.withDesign(.rounded) else { return self }
+        return NSFont(descriptor: d, size: pointSize) ?? self
+    }
+
+    /// Tabular figures via OpenType tnum; keeps design (rounded survives).
+    func tabularDigits() -> NSFont {
+        let d = fontDescriptor.addingAttributes([
+            .featureSettings: [[NSFontDescriptor.FeatureKey.typeIdentifier: kNumberSpacingType,
+                                NSFontDescriptor.FeatureKey.selectorIdentifier: kMonospacedNumbersSelector]],
+        ])
         return NSFont(descriptor: d, size: pointSize) ?? self
     }
 }

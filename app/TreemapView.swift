@@ -105,7 +105,7 @@ final class TreemapNSView: NSView {
                 let text = label.region.width > 130
                     ? "Free space  ·  \(Fmt.size(freeBytes))" : "Free space"
                 name = NSAttributedString(string: text, attributes: [
-                    .font: NSFont.systemFont(ofSize: 11, weight: .semibold),
+                    .font: NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .semibold),
                     .foregroundColor: NSColor.white.withAlphaComponent(0.55),
                 ])
                 let s = name.size()
