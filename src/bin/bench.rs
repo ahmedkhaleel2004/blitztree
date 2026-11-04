@@ -10,6 +10,10 @@
 //!          naive       - serial read_dir + per-file lstat (Disk Inventory X style)
 //!          naive-par   - parallel read_dir + per-file lstat
 //!   BZ_TOP=1 also prints each top-level entry's allocated bytes (for diffing).
+//!          cache       - scan, then report saved-scan sizes and save/load times;
+//!                        BZ_CACHE_KEEP=<file> keeps the saved file
+//!          cache-load  - load BZ_CACHE_FILE, saved from a scan of <path>, once
+//!                        and print the peak memory
 //!   BZ_JSON=1 emits machine-readable totals and timing.
 
 use std::path::{Path, PathBuf};
@@ -76,6 +80,7 @@ fn main() {
                     View {
                         parents: s(bz_parents(handle), n),
                         alloc: s(bz_alloc(handle), n),
+                        unique: s(bz_unique(handle), n),
                         logical: s(bz_logical(handle), n),
                         n_files: s(bz_nfiles(handle), n),
                         flags: s(bz_flags(handle), n),
@@ -146,6 +151,31 @@ fn main() {
                 c.errors.load(Ordering::Relaxed),
             )
         }
+        "cache" => {
+            let progress = Progress::default();
+            let tree = scan(&path, &progress);
+            cache_report(&tree, &path);
+            (
+                tree.n_files[0] as u64,
+                progress.dirs.load(Ordering::Relaxed),
+                tree.alloc[0],
+                tree.errors,
+            )
+        }
+        "cache-load" => {
+            let file = std::env::var("BZ_CACHE_FILE").expect("cache-load: set BZ_CACHE_FILE");
+            let before = peak_rss();
+            let t = Instant::now();
+            let (tree, _) = blitztree::cache::load(Path::new(&file), &path).expect("cache didn't load");
+            println!(
+                "cache-load: {} nodes in {:.3}s, peak memory {:.0} MB (was {:.0} MB before loading)",
+                tree.len(),
+                t.elapsed().as_secs_f64(),
+                peak_rss() as f64 / 1e6,
+                before as f64 / 1e6
+            );
+            (tree.n_files[0] as u64, 0, tree.alloc[0], tree.errors)
+        }
         m => {
             eprintln!("unknown mode {m}");
             std::process::exit(1);
@@ -164,6 +194,101 @@ fn main() {
         bytes as f64 / 1e9,
         total as f64 / dt.as_secs_f64()
     );
+}
+
+/// Saved-scan size and speed for one scanned tree: encoded and compressed
+/// size per zstd level, then a real save and load at the shipped level.
+/// Load is measured to a usable handle (read, decompress, rebuild totals
+/// and child lists, Clean Up candidates), best of three.
+fn cache_report(tree: &blitztree::Tree, root: &Path) {
+    use blitztree::cache;
+    use std::time::{Duration, SystemTime};
+    let n = tree.len();
+    let memory = 4 * n // parents
+        + 3 * 8 * n // alloc, unique, logical
+        + 4 * n // n_files
+        + 2 * n // flags, complete
+        + 4 * (n + 1) + 4 * n.saturating_sub(1) // child_off, children
+        + 4 * (n + 1) + tree.name_blob.len() // names
+        + 4 * tree.clone_members.len() + 12 * tree.clone_groups.len() + 4 * tree.partial_clones.len();
+    let names = tree.name_blob.len();
+    println!("cache: {n} nodes, {:.1} MB columns in memory ({:.1} MB of names)", memory as f64 / 1e6, names as f64 / 1e6);
+    let header = cache::Header {
+        root: root.to_string_lossy().into_owned(),
+        scanned_at: SystemTime::now(),
+        volume: cache::volume_id(root).unwrap_or_default(),
+    };
+    let levels: Vec<i32> = std::env::var("BZ_LEVELS")
+        .map(|s| s.split(',').map(|l| l.parse().expect("BZ_LEVELS: comma-separated integers")).collect())
+        .unwrap_or_else(|_| vec![1, 3, 6, 9]);
+    for level in levels {
+        let t = Instant::now();
+        let (_, sizes) = cache::encode(tree, &header, level).unwrap();
+        println!(
+            "  level {level:>2}: encoded {:.1} MB -> file {:.1} MB in {:.3}s",
+            sizes.encoded as f64 / 1e6,
+            sizes.file as f64 / 1e6,
+            t.elapsed().as_secs_f64()
+        );
+        if level == cache::LEVEL {
+            for (name, encoded, packed) in &sizes.columns {
+                println!("    {name:>14}: {:>7.1} MB -> {:>6.1} MB", *encoded as f64 / 1e6, *packed as f64 / 1e6);
+            }
+        }
+    }
+    // What storing folder totals instead of rebuilding them would add.
+    let mut totals = Vec::new();
+    for i in (0..n).filter(|&i| tree.is_dir(i)) {
+        for v in [tree.alloc[i], tree.unique[i], tree.logical[i], tree.n_files[i] as u64] {
+            let mut v = v;
+            while v >= 0x80 {
+                totals.push(v as u8 | 0x80);
+                v >>= 7;
+            }
+            totals.push(v as u8);
+        }
+    }
+    let packed = zstd::bulk::compress(&totals, cache::LEVEL).unwrap();
+    println!(
+        "  stored folder totals would add {:.1} MB encoded, {:.1} MB compressed",
+        totals.len() as f64 / 1e6,
+        packed.len() as f64 / 1e6
+    );
+
+    let dir = std::env::temp_dir().join(format!("bz-cache-bench-{}", std::process::id()));
+    let file = dir.join("scan.bzcache");
+    let t = Instant::now();
+    let sizes = cache::save(tree, root, SystemTime::now(), &file).unwrap();
+    println!("  save at level {}: {:.3}s, {:.1} MB", cache::LEVEL, t.elapsed().as_secs_f64(), sizes.file as f64 / 1e6);
+    let cache_c = std::ffi::CString::new(file.as_os_str().as_encoded_bytes()).unwrap();
+    let root_c = std::ffi::CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
+    let mut best = Duration::MAX;
+    for _ in 0..3 {
+        let t = Instant::now();
+        let h = blitztree::ffi::bz_cache_load(cache_c.as_ptr(), root_c.as_ptr());
+        assert!(!h.is_null(), "cache didn't load");
+        assert_eq!(blitztree::ffi::bz_take_tree(h) as usize, n);
+        best = best.min(t.elapsed());
+        blitztree::ffi::bz_free(h);
+    }
+    println!("  load to usable: {:.3}s (best of 3)", best.as_secs_f64());
+    match std::env::var_os("BZ_CACHE_KEEP") {
+        Some(keep) => {
+            std::fs::rename(&file, &keep).unwrap();
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+        None => {
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+}
+
+/// The process's peak resident memory so far, in bytes.
+fn peak_rss() -> u64 {
+    let mut usage: libc::rusage = unsafe { std::mem::zeroed() };
+    unsafe { libc::getrusage(libc::RUSAGE_SELF, &mut usage) };
+    // macOS reports bytes.
+    usage.ru_maxrss as u64
 }
 
 #[derive(Default)]
@@ -227,6 +352,7 @@ fn naive_walk_par<'s>(scope: &rayon::Scope<'s>, dir: &Path, c: &'s AtomicCounts)
 struct View<'a> {
     parents: &'a [u32],
     alloc: &'a [u64],
+    unique: &'a [u64],
     logical: &'a [u64],
     n_files: &'a [u32],
     flags: &'a [u8],
@@ -252,7 +378,7 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
 fn digest(f: &View) {
     let n = f.parents.len();
     let name = |i: usize| &f.name_blob[f.name_off[i] as usize..f.name_off[i + 1] as usize];
-    assert!(f.alloc.len() == n && f.logical.len() == n && f.n_files.len() == n && f.flags.len() == n);
+    assert!(f.alloc.len() == n && f.unique.len() == n && f.logical.len() == n && f.n_files.len() == n && f.flags.len() == n);
     assert!(f.child_off.len() == n + 1 && f.name_off.len() == n + 1);
     assert_eq!(f.child_off[0], 0);
     assert_eq!(f.name_off[0], 0);
@@ -265,19 +391,21 @@ fn digest(f: &View) {
         let kids = &f.children[f.child_off[i] as usize..f.child_off[i + 1] as usize];
         let is_dir = f.flags[i] & 1 != 0;
         assert!(is_dir || kids.is_empty());
-        let (mut a, mut l, mut nf) = (0u64, 0u64, 0u32);
+        let (mut a, mut u, mut l, mut nf) = (0u64, 0u64, 0u64, 0u32);
         for (j, &k) in kids.iter().enumerate() {
             let k = k as usize;
             assert_eq!(f.parents[k] as usize, i, "child's parent");
             assert!(!seen[k], "child listed twice");
             seen[k] = true;
-            assert!(j == 0 || f.alloc[kids[j - 1] as usize] >= f.alloc[k], "children sorted by alloc desc");
+            assert!(j == 0 || f.unique[kids[j - 1] as usize] >= f.unique[k], "children sorted by unique desc");
+            assert!(f.unique[k] <= f.alloc[k], "unique within alloc");
             a += f.alloc[k];
+            u += f.unique[k];
             l += f.logical[k];
             nf += if f.flags[k] & 1 != 0 { f.n_files[k] } else { 1 };
         }
         if is_dir {
-            assert_eq!((f.alloc[i], f.logical[i], f.n_files[i]), (a, l, nf), "dir totals");
+            assert_eq!((f.alloc[i], f.unique[i], f.logical[i], f.n_files[i]), (a, u, l, nf), "dir totals");
         }
     }
     // Children always come after their parent, so paths hash in one pass.
@@ -297,7 +425,7 @@ fn digest(f: &View) {
         kids.iter().fold(FNV, |h, &k| fnv(fnv(h, name(k as usize)), &[0xff]))
     };
     let mut rows: Vec<_> = (0..n)
-        .map(|i| (ph[i], f.alloc[i], f.logical[i], f.n_files[i], f.flags[i], order(i)))
+        .map(|i| (ph[i], f.alloc[i], f.logical[i], f.n_files[i], f.flags[i], order(i), f.unique[i]))
         .collect();
     rows.sort_unstable();
     // `shape` leaves out sizes and order.
@@ -312,14 +440,15 @@ fn digest(f: &View) {
         h = fnv(h, &r.3.to_le_bytes());
         h = fnv(h, &[r.4]);
         h = fnv(h, &r.5.to_le_bytes());
+        h = fnv(h, &r.6.to_le_bytes());
     }
     let mut cleanup = FNV;
     for (node, label) in &f.cleanup {
         cleanup = fnv(fnv(cleanup, &ph[*node as usize].to_le_bytes()), label.as_bytes());
     }
     println!(
-        "digest {h:016x}  shape {shape:016x}  cleanup {cleanup:016x} ({})  nodes {n}  alloc {}  logical {}  files {}  errors {}  (invariants ok)",
-        f.cleanup.len(), f.alloc[0], f.logical[0], f.n_files[0], f.errors
+        "digest {h:016x}  shape {shape:016x}  cleanup {cleanup:016x} ({})  nodes {n}  alloc {}  unique {}  logical {}  files {}  errors {}  (invariants ok)",
+        f.cleanup.len(), f.alloc[0], f.unique[0], f.logical[0], f.n_files[0], f.errors
     );
     if let Some(out) = std::env::var_os("BZ_DUMP") {
         let mut paths: Vec<String> = Vec::with_capacity(n);

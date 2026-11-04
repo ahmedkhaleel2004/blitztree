@@ -55,6 +55,22 @@ engine scan plus about 0.15 s to hand the tree to the UI.
   its bytes once; disktree drops the extra names. That is why BlitzTree lists
   about 1% more files for identical totals.
 
+## Saved results
+
+`bench cache <path>` scans a folder, then saves and loads its results the way the app does. Load time is best of 3 and includes rebuilding the child lists and folder totals.
+
+| Folder | Nodes | In memory | File (zstd 3) | Save | Load |
+| --- | --- | --- | --- | --- | --- |
+| `/Applications` | 843,919 | 55.7 MB | 4.7 MB | 0.04 s | 0.04 s |
+| `~/Library` | 3,253,430 | 253 MB | 42.4 MB | 0.14 s | 0.11 s |
+| Whole data volume (4 TB disk) | 39,839,136 | 2,606 MB | 297 MB | 1.11 s | 1.86 s |
+
+- zstd level 3 is the default. On the whole volume, level 1 makes a 385 MB file and level 9 a 249 MB file at 2.2× the save time.
+- File names are 60% of the file (178 MB of 297 MB on the whole volume). Larger zstd windows and long-distance matching shrank them by at most 9%.
+- Folder totals are recomputed on load. Storing them would add 13 MB (4%) to the whole-volume file and save less than 0.5 s of load time.
+- `bench cache-load <path>` with `BZ_CACHE_FILE=<file>` loads a saved file once and prints its peak memory; `BZ_CACHE_KEEP=<file>` makes `bench cache` keep the file it saved. On a whole-volume file (40,115,079 nodes, 298 MB, a 2,622 MB tree), loading peaks at a 2,778 MB memory footprint (`/usr/bin/time -l`), in 1.27–1.29 s warm. Before the loader streamed its per-node columns and mapped the file, the peak was 4,456 MB, at 1.25–1.54 s.
+- While the saved results show and a fresh scan runs, both trees are in memory, so peak memory is about twice a single scan's. BlitzTree shows saved results only when 18 times the file's size, about both trees, fits in half the Mac's RAM, and deletes a saved file that doesn't.
+
 ## Findings
 
 - `searchfs(2)`, the closest thing macOS has to reading NTFS's MFT, was 5×

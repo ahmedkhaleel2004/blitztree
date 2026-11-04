@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+- APFS clones count once. Copies made with `clonefile` (Finder copies, Chrome's code-signing clones in `/private/var/folders`) share their blocks, but every copy used to count in full, so a folder of clones could show hundreds of gigabytes it doesn't use. Sizes, percentages, the treemap and the rings now count a family of clones once, toward the copy with the lowest file id. Rows and tooltips show "+918 GB cloned" or "2.26 GB cloned" where that matters, and the status bar shows how much is shared by clones.
+- Clean Up and AI cleanup sizes count only blocks no other file shares. Blocks shared with an APFS clone don't count as freed, because a clone elsewhere, even one changed since, can keep them on disk. The Clean Up panel lists folders that free at least 50 MB, largest first by what they free.
+- JSON CLI: entries and the summary add `unique_bytes` and `cloned_bytes`. `allocated_bytes` keeps its meaning. Clean Up candidates are now selected and sorted by unique bytes.
+- Scans read each file's clone id and sharing flags, which makes them about 10% slower. Asking for each file's private size as well made scans 3x slower, so BlitzTree asks for it only for Clean Up candidates.
+- Launch shows the last results right away. After each scan, BlitzTree saves the results, compressed, to `~/Library/Caches/dev.ahmed.blitztree`. The first scan of that folder after the next launch shows them within a second or two, with "Results from 2 hours ago · refreshing 40%" and a progress bar in the status bar, while a fresh scan runs. The fresh results then replace them, keeping the folder on screen, the selection and open rows. To free the space they take, choose BlitzTree > Delete Saved Results…, or turn off BlitzTree > Save Results for Fast Launch. While they are on screen, picking folders in Clean Up, Move to Trash (in Clean Up and in the right-click menu) and "Clean up with Claude Code" wait for the fresh scan. Rescans within a session, such as the one after Move to Trash, start fresh. On a Mac where the saved results and the fresh scan together would take more than half the memory, BlitzTree doesn't keep them. Saved results from another version of BlitzTree, another disk, or a damaged file are ignored.
+
 ## 0.5.6 — 2026-09-27
 
 - BlitzTree updates itself. It checks GitHub for a new release once a day, downloads it in the background and installs it when you quit. Check for Updates… is in the BlitzTree menu. Updates are signed, and Full Disk Access carries over.

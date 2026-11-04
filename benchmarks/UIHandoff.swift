@@ -30,7 +30,7 @@ struct UIHandoff {
                 if definition.identifier.rawValue == "name" {
                     precondition(cell.textField?.stringValue == item.tree.name(item.id), "Stale displayed name")
                 } else if definition.identifier.rawValue == "size" {
-                    precondition(cell.textField?.stringValue == Fmt.size(item.tree.alloc[item.id]), "Stale displayed size")
+                    precondition(cell.textField?.stringValue == Fmt.size(item.tree.size[item.id]), "Stale displayed size")
                 }
                 checked += 1
             }
@@ -53,13 +53,25 @@ struct UIHandoff {
         window.makeKeyAndOrderFront(nil)
         let runs = CommandLine.arguments.count > 2 ? Int(CommandLine.arguments[2])! : 5
         Task { @MainActor in
+            // BZ_UI_PANEL: open the Clean Up panel, as the first launch scan does.
+            if ProcessInfo.processInfo.environment["BZ_UI_PANEL"] != nil { model.panelRequests += 1 }
             try? await Task.sleep(for: .seconds(1))
             for trial in 0..<runs {
                 let bodies = UIHandoffMetrics.rootBodies
                 NSLog("BZ trial %d begin", trial)
                 model.startScan(path: CommandLine.arguments[1])
                 var ticks = 0
+                var sawSaved = false
+                // BZ_UI_SAVED: end the run once the saved scan is on screen
+                // (pair with BZ_VOLUME_DELAY so the fresh one is still running).
+                let stopOnSaved = ProcessInfo.processInfo.environment["BZ_UI_SAVED"] != nil
                 while model.scanning {
+                    if model.showingSaved { sawSaved = true }
+                    if stopOnSaved, model.showingSaved {
+                        UIHandoffMetrics.engineDoneAt = UIHandoffMetrics.engineDoneAt ?? Date()
+                        try? await Task.sleep(for: .milliseconds(500))
+                        break
+                    }
                     ticks += 1
                     try? await Task.sleep(for: .milliseconds(10))
                 }
@@ -68,8 +80,8 @@ struct UIHandoff {
                 window.displayIfNeeded()
                 NSLog("BZ visible handoff: %.3f ms", -UIHandoffMetrics.engineDoneAt!.timeIntervalSinceNow * 1000)
                 verifyCells(window, model: model)
-                NSLog("BZ trial %d visible nodes=%d", trial, model.tree!.count)
-                if let delay = ProcessInfo.processInfo.environment["BZ_VOLUME_DELAY"].flatMap(Double.init) {
+                NSLog("BZ trial %d visible nodes=%d saved shown=%d", trial, model.tree!.count, sawSaved ? 1 : 0)
+                if !model.showingSaved, let delay = ProcessInfo.processInfo.environment["BZ_VOLUME_DELAY"].flatMap(Double.init) {
                     precondition(ticks > Int(delay * 30), "Volume metadata blocked the main actor")
                     precondition(model.elapsed >= delay - 0.1, "Progress froze while waiting for metadata")
                     NSLog("BZ delayed metadata: %d responsive main-actor ticks", ticks)
@@ -121,7 +133,23 @@ struct UIHandoff {
             if let path = ProcessInfo.processInfo.environment["BZ_UI_IMAGE"], let view = window.contentView,
                let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: bitmap)
-                try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+                // The window, not the content view, draws the background the
+                // status bar sits on; without it, light text lands on clear.
+                let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: bitmap.pixelsWide,
+                                             pixelsHigh: bitmap.pixelsHigh, bitsPerSample: 8, samplesPerPixel: 4,
+                                             hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                             bytesPerRow: 0, bitsPerPixel: 0)!
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: image)
+                let rect = NSRect(x: 0, y: 0, width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+                NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
+                    NSColor.windowBackgroundColor.setFill()
+                    rect.fill()
+                }
+                bitmap.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1,
+                            respectFlipped: false, hints: nil)
+                NSGraphicsContext.restoreGraphicsState()
+                try! image.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
             }
             app.terminate(nil)
         }

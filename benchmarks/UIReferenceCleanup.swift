@@ -17,12 +17,12 @@ nonisolated enum ReferenceCleanup {
                 // Already-trashed things aren't worth offering again.
                 guard tree.isDir(child), tree.name(child) != ".Trash" else { continue }
                 if let kind = kind(of: child, in: tree) {
-                    if tree.alloc[child] >= minBytes {
+                    if tree.size[child] >= minBytes {
                         let path = tree.path(child)
                         var display = tree.displayPath(child)
                         if display.hasPrefix(home) { display = "~" + display.dropFirst(home.count) }
                         found.append(CleanupItem(node: child, path: path, display: display,
-                                                 kind: kind, bytes: tree.alloc[child]))
+                                                 kind: kind, bytes: tree.size[child]))
                     }
                 } else {
                     stack.append(child)

@@ -68,7 +68,7 @@ nonisolated enum Squarify {
     static func items(tree: Tree, dir: Int, into items: inout [Item]) {
         items.removeAll(keepingCapacity: true)
         for k in tree.children(dir) {
-            let s = Double(tree.alloc[Int(k)])
+            let s = Double(tree.size[Int(k)])
             if s > 0 { items.append((Int(k), s)) }
         }
     }
@@ -465,7 +465,7 @@ nonisolated enum TreemapRenderer {
                 while let first = tree.children(layoutNode).first {
                     let fi = Int(first)
                     guard tree.isDir(fi),
-                          Double(tree.alloc[fi]) >= 0.99 * Double(max(tree.alloc[layoutNode], 1))
+                          Double(tree.size[fi]) >= 0.99 * Double(max(tree.size[layoutNode], 1))
                     else { break }
                     stripName += "  ▸  " + tree.name(fi)
                     layoutNode = fi

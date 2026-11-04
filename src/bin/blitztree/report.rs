@@ -15,6 +15,7 @@ fn entry(t: &Tree, i: usize) -> Value {
     json!({
         "path": t.path(i), "kind": if is_dir { "directory" } else { "file_or_link" },
         "allocated_bytes": t.alloc[i], "logical_bytes": t.logical[i],
+        "unique_bytes": t.unique[i], "cloned_bytes": t.cloned(i),
         "file_count": if is_dir { t.n_files[i] } else { 1 },
         "complete": t.complete[i],
     })
@@ -103,8 +104,8 @@ pub fn quick_wins(scan: &Tree, options: &Options) -> Value {
         "displayed_allocated_bytes": displayed_allocated_bytes,
         "inventory": inventory(scan, options),
         "scope": "The same folder recognition as the Clean Up panel, within the requested scan root. The root itself is not a candidate.",
-        "sort": "allocated_bytes descending, path ascending",
+        "sort": "unique_bytes descending, path ascending",
         "reclaimable_bytes": Value::Null,
-        "note": "These are the Clean Up panel's name/structure heuristics, not a safety assessment. They do not check project activity, ownership, local edits or reproducibility. Review each path and stop the owning app/tool before considering removal. Incomplete candidates have partial sizes. Allocated bytes are footprint, not guaranteed recoverable space; hard links, APFS clones/snapshots and open files affect recovery. Moving to Trash alone does not free space. No action is authorized by this report."
+        "note": "These are the Clean Up panel's name/structure heuristics, not a safety assessment. They do not check project activity, ownership, local edits or reproducibility. Review each path and stop the owning app/tool before considering removal. Incomplete candidates have partial sizes. Allocated bytes are footprint, not guaranteed recoverable space; hard links, APFS clones/snapshots and open files affect recovery. Unique bytes count each APFS clone family's shared blocks once. Moving to Trash alone does not free space. No action is authorized by this report."
     })
 }

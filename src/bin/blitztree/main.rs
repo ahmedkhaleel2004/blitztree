@@ -182,6 +182,7 @@ fn run() -> Result<Value, (i32, String)> {
         "scan_seconds": elapsed,
         "options": {"min_bytes": options.min_bytes, "limit": options.limit},
         "summary": {"allocated_bytes": tree.alloc[0], "logical_bytes": tree.logical[0],
+            "unique_bytes": tree.unique[0], "cloned_bytes": tree.cloned(0),
             "file_count": progress.files.load(Ordering::Relaxed), "directory_count": progress.dirs.load(Ordering::Relaxed)},
         "coverage": {"complete": tree.complete[0], "errors": tree.errors,
             "entry_errors": progress.entry_errors.load(Ordering::Relaxed),

@@ -503,8 +503,11 @@ final class PlanItem: Identifiable {
     var trashed: [URL] = []
     var trashedBytes: UInt64 = 0
 
-    /// Size from the scan where it can be measured, else the agent's figure.
-    let bytes: UInt64
+    /// The scan's size of its paths, else the agent's figure. Once the plan
+    /// is written, `AgentRun` replaces a scanned figure with what deleting
+    /// frees (blocks shared with APFS clones don't count), which asks the
+    /// file system and so is measured off the main thread.
+    var bytes: UInt64
     /// Its folders in the scan the plan was made from, for the treemap.
     let nodes: [Int]
 
@@ -578,9 +581,11 @@ final class PlanItem: Identifiable {
         // Measured sizes, not counting a path inside another listed one twice.
         let nodes = Set(paths.compactMap { tree.node(at: $0) })
         let outer = nodes.filter { node in !tree.ancestry(node).dropLast().contains(where: nodes.contains) }
-        let measured = outer.reduce(UInt64(0)) { $0 + tree.alloc[$1] }
+        // A scanned path's figure stands even when it is zero (clones whose
+        // blocks another file keeps); the agent's guess is only for paths
+        // the scan never saw.
         self.nodes = Array(outer)
-        bytes = measured > 0 ? measured : UInt64(max(0, spec.bytes))
+        bytes = outer.isEmpty ? UInt64(max(0, spec.bytes)) : outer.reduce(0) { $0 + tree.size[$1] }
     }
 
     var isCommand: Bool { spec.action == "command" && !viaTrash }
@@ -763,7 +768,7 @@ final class AgentRun {
     }
 
     private func handle(_ event: AgentStreamReader.Event) {
-        guard phase == .thinking else { return }
+        guard phase == .thinking, !measuring else { return }
         switch event {
         case .activity(let text):
             step(text)
@@ -786,7 +791,7 @@ final class AgentRun {
 
     private func processEnded(status: Int32, stderr: String) {
         process = nil
-        guard phase == .thinking else { return }
+        guard phase == .thinking, !measuring else { return }
         if !items.isEmpty {
             finishPlanning()
         } else if status != 0 {
@@ -796,8 +801,29 @@ final class AgentRun {
         }
     }
 
+    /// Set while the finished plan's sizes are measured, so a late event or
+    /// the agent exiting doesn't finish the plan twice.
+    private var measuring = false
+
     private func finishPlanning() {
         planSeconds = -startedAt.timeIntervalSinceNow
+        measuring = true
+        let items = self.items, tree = self.tree
+        let nodes = items.map { $0.nodes.map(UInt32.init) }
+        Task { [weak self] in
+            // What deleting each item frees reads partly cloned files'
+            // attributes, so it runs off the main thread.
+            let freed = await Task.detached(priority: .userInitiated) {
+                nodes.map { $0.isEmpty ? nil : tree.reclaimable($0).reduce(0, +) }
+            }.value
+            guard let self, phase == .thinking else { return }
+            for (item, bytes) in zip(items, freed) { if let bytes { item.bytes = bytes } }
+            showPlan()
+        }
+    }
+
+    private func showPlan() {
+        measuring = false
         items.sort { $0.bytes > $1.bytes }
         if summary.isEmpty {
             summary = "About \(Fmt.size(items.filter { $0.blocked == nil }.reduce(0) { $0 + $1.bytes })) can go."
@@ -1210,14 +1236,14 @@ nonisolated enum AgentPrompt {
         var stack = [0]
         while let parent = stack.popLast() {
             for raw in tree.children(parent) {
-                let i = Int(raw), size = tree.alloc[i]
+                let i = Int(raw), size = tree.size[i]
                 guard size >= 100_000_000 else { break }
                 if tree.isDir(i) {
                     stack.append(i)
                     // Still descend through pass-through folders: only their
                     // redundant table row is omitted.
                     if let first = tree.children(i).first, tree.isDir(Int(first)),
-                       Double(tree.alloc[Int(first)]) >= 0.95 * Double(size) { continue }
+                       Double(tree.size[Int(first)]) >= 0.95 * Double(size) { continue }
                     folders.append(i)
                 } else if size >= 250_000_000 {
                     files.append(i)
@@ -1227,7 +1253,7 @@ nonisolated enum AgentPrompt {
         // The original scan-order sort was stable. Preserve its node-ID
         // order for ties even though traversal now follows the hierarchy.
         func larger(_ a: Int, _ b: Int) -> Bool {
-            tree.alloc[a] == tree.alloc[b] ? a < b : tree.alloc[a] > tree.alloc[b]
+            tree.size[a] == tree.size[b] ? a < b : tree.size[a] > tree.size[b]
         }
         folders.sort(by: larger)
         files.sort(by: larger)
@@ -1245,7 +1271,8 @@ nonisolated enum AgentPrompt {
         "Clean up" and is watching a live view of your steps, so be fast. Their home folder is \(home).
 
         Below is BlitzTree's scan (\(scanRoot == "/System/Volumes/Data" ? "whole disk" : scanRoot), \
-        allocated sizes, measured seconds ago). Use it; do not re-scan the disk. Most plans need no \
+        allocated sizes with APFS clones counted once, measured seconds ago). Use it; do not re-scan \
+        the disk. Most plans need no \
         commands at all. Only check what you really cannot judge from the tables, batched (one \
         `du -sk a b c` beats several), at most 3 commands.
 
@@ -1289,11 +1316,11 @@ nonisolated enum AgentPrompt {
         }
         md += "\n## Largest folders\n\n| Size | Files | Path |\n|---:|---:|---|\n"
         for i in folders.prefix(250) {
-            md += "| \(Fmt.size(tree.alloc[i])) | \(Fmt.num(UInt64(tree.nFiles[i]))) | \(shown(i))/ |\n"
+            md += "| \(Fmt.size(tree.size[i])) | \(Fmt.num(UInt64(tree.nFiles[i]))) | \(shown(i))/ |\n"
         }
         if !files.isEmpty {
             md += "\n## Largest files\n\n| Size | Path |\n|---:|---|\n"
-            for i in files.prefix(80) { md += "| \(Fmt.size(tree.alloc[i])) | \(shown(i)) |\n" }
+            for i in files.prefix(80) { md += "| \(Fmt.size(tree.size[i])) | \(shown(i)) |\n" }
         }
         return md
     }
@@ -1382,16 +1409,16 @@ nonisolated enum AgentPrompt {
         guard let codex = tree.node(at: root) else { return "" }
         var chats: [(node: Int, path: String)] = []
         for day in tree.children(codex).map(Int.init) {
-            guard tree.alloc[day] >= 100_000_000 else { break }
+            guard tree.size[day] >= 100_000_000 else { break }
             let dayPath = root + "/" + tree.name(day)
             for chat in tree.children(day).map(Int.init) {
-                guard tree.alloc[chat] >= 100_000_000 else { break }
+                guard tree.size[chat] >= 100_000_000 else { break }
                 let path = dayPath + "/" + tree.name(chat)
                 if tree.isDir(chat), CleanupGuard.codexChat(path) == path { chats.append((chat, path)) }
             }
         }
         guard !chats.isEmpty else { return "" }
-        chats.sort { tree.alloc[$0.node] > tree.alloc[$1.node] }
+        chats.sort { tree.size[$0.node] > tree.size[$1.node] }
 
         var md = """
 
@@ -1410,8 +1437,8 @@ nonisolated enum AgentPrompt {
         let sessions = CodexSessions.lastActive()
         for (node, path) in chats.prefix(40) {
             let used = sessions.filter { $0.key == path || $0.key.hasPrefix(path + "/") }.values.max()
-            let inside = tree.children(node).prefix(3).map { "\(tree.name(Int($0))) \(Fmt.size(tree.alloc[Int($0)]))" }
-            md += "| \(Fmt.size(tree.alloc[node])) | \(path) | \(used.map(ago) ?? "unknown") | \(inside.joined(separator: ", ")) |\n"
+            let inside = tree.children(node).prefix(3).map { "\(tree.name(Int($0))) \(Fmt.size(tree.size[Int($0)]))" }
+            md += "| \(Fmt.size(tree.size[node])) | \(path) | \(used.map(ago) ?? "unknown") | \(inside.joined(separator: ", ")) |\n"
         }
         return md
     }

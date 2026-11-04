@@ -9,23 +9,36 @@ nonisolated struct CleanupItem: Identifiable, Sendable {
     let path: String
     let display: String
     let kind: String
+    /// What deleting it frees: blocks shared with APFS clones don't count,
+    /// since a clone elsewhere can keep them on disk.
     let bytes: UInt64
     var id: Int { node }
 }
 
 nonisolated enum Cleanup {
+    /// Smallest folder worth listing; the same as `MIN_BYTES` in cleanup.rs.
+    static let minBytes: UInt64 = 50_000_000
+
     /// The Rust engine selects candidates for both the panel and JSON CLI.
     /// Swift only supplies presentation paths; rules and labels live in cleanup.rs.
+    /// The engine picks and orders folders by their size with clones counted
+    /// once; the panel shows what deleting frees, which can be less, so it
+    /// drops folders that fall under the cutoff and orders by that figure.
+    /// Reads partly cloned files' attributes: call it off the main thread.
     static func find(in tree: Tree) -> [CleanupItem] {
         let home = NSHomeDirectory()
-        return (0..<tree.cleanupCount).map { index in
+        let freed = tree.reclaimable(Array(UnsafeBufferPointer(start: tree.cleanupNodes, count: tree.cleanupCount)))
+        let items = (0..<tree.cleanupCount).compactMap { index -> CleanupItem? in
+            guard freed[index] >= minBytes else { return nil }
             let node = Int(tree.cleanupNodes[index])
             let path = tree.path(node)
             var display = tree.displayPath(node)
             if display.hasPrefix(home) { display = "~" + display.dropFirst(home.count) }
             return CleanupItem(node: node, path: path, display: display,
-                               kind: tree.cleanupDescription(index), bytes: tree.alloc[node])
+                               kind: tree.cleanupDescription(index), bytes: freed[index])
         }
+        // Stable, so equal sizes keep the engine's path order.
+        return items.enumerated().sorted { ($0.element.bytes, $1.offset) > ($1.element.bytes, $0.offset) }.map(\.element)
     }
 }
 
@@ -67,12 +80,12 @@ final class CleanupTrashBatch {
 /// agent cleanup is on screen, the whole panel is that run.
 struct CleanupPanel: View {
     let model: ScanModel
-    @State private var picked: Set<Int> = []
+    @State private var picked: Set<String> = []
     @State private var confirming = false
 
     private var agent: InstalledAgent? { model.preferredAgent }
 
-    private var pickedItems: [CleanupItem] { model.cleanup.filter { picked.contains($0.id) } }
+    private var pickedItems: [CleanupItem] { model.cleanup.filter { picked.contains($0.path) } }
     private var pickedBytes: UInt64 { pickedItems.reduce(0) { $0 + $1.bytes } }
     private var totalBytes: UInt64 { model.cleanup.reduce(0) { $0 + $1.bytes } }
 
@@ -89,7 +102,7 @@ struct CleanupPanel: View {
                     .transition(.opacity)
             }
         }
-        .confirmationDialog(picked.count == 1 ? "Move 1 folder to the Trash?" : "Move \(picked.count) folders to the Trash?", isPresented: $confirming) {
+        .confirmationDialog(pickedItems.count == 1 ? "Move 1 folder to the Trash?" : "Move \(pickedItems.count) folders to the Trash?", isPresented: $confirming) {
             Button("Move to Trash (\(Fmt.size(pickedBytes)))", role: .destructive) { trashPicked() }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -117,11 +130,13 @@ struct CleanupPanel: View {
             List(model.cleanup) { item in
                 HStack(alignment: .top, spacing: 8) {
                     Toggle("", isOn: Binding(
-                        get: { picked.contains(item.id) },
-                        set: { on in if on { picked.insert(item.id) } else { picked.remove(item.id) } }
+                        get: { picked.contains(item.path) },
+                        set: { on in if on { picked.insert(item.path) } else { picked.remove(item.path) } }
                     ))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
+                    // Nothing is picked by sizes that may be out of date.
+                    .disabled(model.showingSaved)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.display)
                             .lineLimit(1)
@@ -150,17 +165,24 @@ struct CleanupPanel: View {
             Divider()
             VStack(spacing: 8) {
                 agentButton
-                    .disabled(model.cleanupTrash.running)
+                    .disabled(model.cleanupTrash.running || model.scanning)
                 Button {
                     confirming = true
                 } label: {
-                    Text(picked.isEmpty ? "Select folders to clean up"
-                         : "Move \(picked.count) to Trash · \(Fmt.size(pickedBytes))")
+                    Text(pickedItems.isEmpty ? "Select folders to clean up"
+                         : "Move \(pickedItems.count) to Trash · \(Fmt.size(pickedBytes))")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                .disabled(picked.isEmpty || model.scanning || model.cleanupTrash.running)
+                .disabled(pickedItems.isEmpty || model.scanning || model.cleanupTrash.running)
+                // Results on screen during a scan may be out of date: nothing
+                // is deleted or sent to an agent from them.
+                if model.scanning, model.tree != nil {
+                    Text("Waiting for the fresh scan")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .padding(12)
         }

@@ -251,13 +251,19 @@ private struct ScanProgress: View {
     let model: ScanModel
     var body: some View {
         VStack(spacing: 14) {
-            Text(Fmt.size(model.bytes))
-                .font(.system(size: 44, weight: .semibold, design: .rounded))
-                .monospacedDigit()
-                .foregroundStyle(.white)
-            Text("\(Fmt.num(model.files)) files · \(Fmt.num(model.dirs)) folders · \(String(format: "%.2f", model.elapsed))s")
-                .font(.system(.body, design: .monospaced))
-                .foregroundStyle(.secondary)
+            if model.loadingSaved {
+                Text("Loading last scan…")
+                    .font(.system(size: 28, weight: .semibold, design: .rounded))
+                    .foregroundStyle(.white)
+            } else {
+                Text(Fmt.size(model.bytes))
+                    .font(.system(size: 44, weight: .semibold, design: .rounded))
+                    .monospacedDigit()
+                    .foregroundStyle(.white)
+                Text("\(Fmt.num(model.files)) files · \(Fmt.num(model.dirs)) folders · \(String(format: "%.2f", model.elapsed))s")
+                    .font(.system(.body, design: .monospaced))
+                    .foregroundStyle(.secondary)
+            }
         }
         // No spinner: the counters are the progress, and a ProgressView is an
         // AppKit view whose insertion recomputed the window's key-view loop
@@ -279,12 +285,23 @@ private struct ScanStatusBar: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    let a = tree.alloc[sel]
-                    let rootA = max(tree.alloc[model.viewRoot], 1)
+                    let a = tree.size[sel]
+                    let rootA = max(tree.size[model.viewRoot], 1)
+                    if let note = tree.cloneNote(sel) {
+                        Text(note).foregroundStyle(.tertiary)
+                    }
                     Text("\(Fmt.size(a)) · \(String(format: "%.1f%%", 100 * Double(a) / Double(rootA)))")
                         .monospacedDigit()
+                    if tree.isSaved { savedNote(tree) }
                 } else {
-                    Text("\(Fmt.num(UInt64(tree.nFiles[model.viewRoot]))) files · \(Fmt.size(tree.alloc[model.viewRoot]))")
+                    Text("\(Fmt.num(UInt64(tree.nFiles[model.viewRoot]))) files · \(Fmt.size(tree.size[model.viewRoot]))")
+                    let cloned = tree.cloned(model.viewRoot)
+                    if cloned >= 1_000_000 {
+                        Text("\(Fmt.size(cloned)) shared by APFS clones (counted once)")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                     Spacer()
                     if tree.errors > 0 {
                         if FDA.isActive() {
@@ -305,9 +322,13 @@ private struct ScanStatusBar: View {
                             .buttonStyle(.borderless)
                         }
                     }
-                    Text("scanned in \(String(format: "%.1fs", model.elapsed))")
-                        .foregroundStyle(.secondary)
-                        .monospacedDigit()
+                    if tree.isSaved {
+                        savedNote(tree)
+                    } else {
+                        Text("scanned in \(String(format: "%.1fs", model.elapsed))")
+                            .foregroundStyle(.secondary)
+                            .monospacedDigit()
+                    }
                 }
             } else {
                 Text("BlitzTree").foregroundStyle(.tertiary)
@@ -317,6 +338,28 @@ private struct ScanStatusBar: View {
         .font(.callout)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+
+    /// The last launch's results are on screen while a fresh scan runs.
+    private func savedNote(_ tree: Tree) -> some View {
+        let age = RelativeDateTimeFormatter().localizedString(for: tree.scannedAt, relativeTo: Date())
+        // Above the other status text: when the bar runs out of room, this
+        // is the line that must stay readable.
+        // The saved file count is the best guess at how many the fresh scan
+        // will find, so it drives the bar.
+        let expected = max(Double(tree.nFiles[0]), 1)
+        let done = min(Double(model.files) / expected, 1)
+        return HStack(spacing: 8) {
+            Text("Results from \(age) · refreshing \(Int(done * 100))%")
+                .foregroundStyle(.secondary)
+                .monospacedDigit()
+                .lineLimit(1)
+                .fixedSize()
+            ProgressView(value: done)
+                .progressViewStyle(.linear)
+                .frame(width: 120)
+        }
+        .layoutPriority(1)
     }
 }
 
@@ -378,12 +421,52 @@ final class NameCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private static let noteFont = NSFont.systemFont(ofSize: 11)
+    private static let noteLineHeight = ceil(noteFont.ascender - noteFont.descender + noteFont.leading)
+    /// Muted text after the name, e.g. "+918 GB cloned". Made on first use:
+    /// most rows never have one.
+    private var noteField: NSTextField?
+
+    var note: String? {
+        didSet {
+            guard note != oldValue else { return }
+            if let note, noteField == nil {
+                let tf = NSTextField(labelWithString: note)
+                tf.font = Self.noteFont
+                tf.textColor = .tertiaryLabelColor
+                tf.alignment = .right
+                tf.lineBreakMode = .byTruncatingTail
+                addSubview(tf)
+                noteField = tf
+            }
+            noteField?.stringValue = note ?? ""
+            noteField?.isHidden = note == nil
+            needsLayout = true
+        }
+    }
+
     override func layout() {
         super.layout()
         let h = bounds.height
         imageView?.frame = NSRect(x: 2, y: ((h - 16) / 2).rounded(), width: 16, height: 16)
+        var noteWidth: CGFloat = 0
+        if let noteField, note != nil {
+            // The name comes first; the note gets what's left, or none if
+            // too little is (the tooltip and status bar repeat it).
+            let nameWidth = ceil(textField?.attributedStringValue.size().width ?? 0) + 4
+            let left = bounds.width - 25 - nameWidth - 6
+            // Too narrow for the figure: just "cloned" (or nothing).
+            let width = { (s: String) in ceil((s as NSString).size(withAttributes: [.font: Self.noteFont]).width) + 4 }
+            let fits = [note, "cloned"].compactMap { $0 }.first { width($0) <= left }
+            noteField.stringValue = fits ?? ""
+            noteWidth = fits.map(width) ?? 0
+            noteField.isHidden = fits == nil
+            noteField.frame = NSRect(x: bounds.width - 2 - noteWidth, y: ((h - Self.noteLineHeight) / 2).rounded(),
+                                     width: noteWidth, height: Self.noteLineHeight)
+            if noteWidth > 0 { noteWidth += 6 }
+        }
         textField?.frame = NSRect(x: 23, y: ((h - Self.lineHeight) / 2).rounded(),
-                                  width: max(0, bounds.width - 25), height: Self.lineHeight)
+                                  width: max(0, bounds.width - 25 - noteWidth), height: Self.lineHeight)
     }
 }
 
@@ -465,6 +548,15 @@ struct OutlinePanel: NSViewRepresentable {
                     && zip(roots, childIDs).allSatisfy { item, id in
                         item.canRebind(to: Int(id), in: t) && outline?.isItemExpanded(item) == false
                     }
+                // Rows open in the saved results stay open in the fresh scan.
+                var reopen: [[[UInt8]]] = []
+                if let old = tree, old.isSaved, !t.isSaved, let outline, outline.numberOfRows <= 20_000 {
+                    for row in 0..<outline.numberOfRows {
+                        if let it = outline.item(atRow: row) as? Item, outline.isItemExpanded(it) {
+                            reopen.append(old.namePath(it.id))
+                        }
+                    }
+                }
                 tree = t
                 viewRoot = model.viewRoot
                 let started = Date()
@@ -484,6 +576,10 @@ struct OutlinePanel: NSViewRepresentable {
                 } else {
                     roots = childIDs.map { Item(id: Int($0), tree: t) }
                     outline?.reloadData()
+                    // In row order, so each folder opens after its parent.
+                    for node in t.nodes(at: reopen) {
+                        if let node, let it = item(for: node) { outline?.expandItem(it) }
+                    }
                 }
                 if ProcessInfo.processInfo.environment["BZ_TIMING"] != nil {
                     NSLog("BZ list reload: %.1f ms", -started.timeIntervalSinceNow * 1000)
@@ -579,12 +675,13 @@ struct OutlinePanel: NSViewRepresentable {
                 let name = tree.name(it.id)
                 cell.textField?.stringValue = name
                 cell.imageView?.image = icon(for: name, isDir: tree.isDir(it.id))
+                (cell as? NameCell)?.note = tree.cloneNote(it.id)
             } else if column == "size" {
-                cell.textField?.stringValue = Fmt.size(tree.alloc[it.id])
+                cell.textField?.stringValue = Fmt.size(tree.size[it.id])
             } else {
                 let parent = Int(tree.parents[it.id])
-                let pAlloc = parent == Int(UInt32.max) ? tree.alloc[0] : tree.alloc[parent]
-                let pct = pAlloc > 0 ? 100 * Double(tree.alloc[it.id]) / Double(pAlloc) : 0
+                let pAlloc = parent == Int(UInt32.max) ? tree.size[0] : tree.size[parent]
+                let pct = pAlloc > 0 ? 100 * Double(tree.size[it.id]) / Double(pAlloc) : 0
                 cell.textField?.stringValue = pct < 0.5 ? "–" : String(format: "%.0f%%", pct)
                 cell.textField?.textColor = .tertiaryLabelColor
             }
@@ -600,13 +697,24 @@ struct OutlinePanel: NSViewRepresentable {
 
         /// Treemap click → expand ancestors, select and reveal the row here.
         func syncSelection() {
-            guard let outline, let tree, let sel = model?.selection else { return }
+            guard let outline, let sel = model?.selection else { return }
             if let cur = outline.item(atRow: outline.selectedRow) as? Item, cur.id == sel { return }
+            if let target = item(for: sel) {
+                let row = outline.row(forItem: target)
+                if row >= 0 {
+                    outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+                    outline.scrollRowToVisible(row)
+                }
+            }
+        }
 
+        /// The row for `node`, its ancestors expanded. Nil outside the view root.
+        private func item(for node: Int) -> Item? {
+            guard let outline, let tree else { return nil }
             var chain: [Int] = []
-            var cur = sel
+            var cur = node
             while cur != viewRoot {
-                if cur == Int(UInt32.max) { return } // outside current view root
+                if cur == Int(UInt32.max) { return nil } // outside current view root
                 chain.append(cur)
                 cur = Int(tree.parents[cur])
             }
@@ -615,20 +723,14 @@ struct OutlinePanel: NSViewRepresentable {
             var level = roots
             var target: Item?
             for id in chain {
-                guard let it = level.first(where: { $0.id == id }) else { return }
+                guard let it = level.first(where: { $0.id == id }) else { return nil }
                 target = it
                 if id != chain.last {
                     outline.expandItem(it)
                     level = it.children
                 }
             }
-            if let target {
-                let row = outline.row(forItem: target)
-                if row >= 0 {
-                    outline.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
-                    outline.scrollRowToVisible(row)
-                }
-            }
+            return target
         }
 
         @objc func doubleClicked(_ sender: NSOutlineView) {

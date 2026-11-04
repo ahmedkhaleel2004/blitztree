@@ -233,26 +233,27 @@ nonisolated enum ReferenceAgentPrompt {
         var folders: [Int] = []
         var files: [Int] = []
         for i in 1..<tree.count {
-            let size = tree.alloc[i]
+            let size = tree.size[i]
             if tree.isDir(i) {
                 guard size >= 100_000_000 else { continue }
                 // Skip pass-through folders the next line would repeat.
                 if let first = tree.children(i).first, tree.isDir(Int(first)),
-                   Double(tree.alloc[Int(first)]) >= 0.95 * Double(size) { continue }
+                   Double(tree.size[Int(first)]) >= 0.95 * Double(size) { continue }
                 folders.append(i)
             } else if size >= 250_000_000 {
                 files.append(i)
             }
         }
-        folders.sort { tree.alloc[$0] > tree.alloc[$1] }
-        files.sort { tree.alloc[$0] > tree.alloc[$1] }
+        folders.sort { tree.size[$0] > tree.size[$1] }
+        files.sort { tree.size[$0] > tree.size[$1] }
 
         var md = """
         You are the cleanup agent inside BlitzTree, a macOS disk-space app. The user clicked \
         "Clean up" and is watching a live view of your steps, so be fast. Their home folder is \(home).
 
         Below is BlitzTree's scan (\(scanRoot == "/System/Volumes/Data" ? "whole disk" : scanRoot), \
-        allocated sizes, measured seconds ago). Use it; do not re-scan the disk. Most plans need no \
+        allocated sizes with APFS clones counted once, measured seconds ago). Use it; do not re-scan \
+        the disk. Most plans need no \
         commands at all. Only check what you really cannot judge from the tables, batched (one \
         `du -sk a b c` beats several), at most 3 commands.
 
@@ -296,11 +297,11 @@ nonisolated enum ReferenceAgentPrompt {
         }
         md += "\n## Largest folders\n\n| Size | Files | Path |\n|---:|---:|---|\n"
         for i in folders.prefix(250) {
-            md += "| \(Fmt.size(tree.alloc[i])) | \(Fmt.num(UInt64(tree.nFiles[i]))) | \(shown(i))/ |\n"
+            md += "| \(Fmt.size(tree.size[i])) | \(Fmt.num(UInt64(tree.nFiles[i]))) | \(shown(i))/ |\n"
         }
         if !files.isEmpty {
             md += "\n## Largest files\n\n| Size | Path |\n|---:|---|\n"
-            for i in files.prefix(80) { md += "| \(Fmt.size(tree.alloc[i])) | \(shown(i)) |\n" }
+            for i in files.prefix(80) { md += "| \(Fmt.size(tree.size[i])) | \(shown(i)) |\n" }
         }
         return md
     }
