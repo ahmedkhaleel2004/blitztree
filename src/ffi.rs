@@ -154,8 +154,8 @@ pub unsafe extern "C" fn bz_cleanup_nodes(h: *mut BzScan) -> *const u32 {
 ///
 /// # Safety
 /// `h` must be a live scan handle, with no concurrent mutation or free.
-/// `nodes` and `out` must each have room for `count` elements, and every
-/// Out-of-range nodes leave `out` untouched.
+/// `nodes` and `out` must each have room for `count` elements. If any node
+/// is out of range, `out` is left untouched.
 #[no_mangle]
 pub unsafe extern "C" fn bz_reclaimable(h: *mut BzScan, nodes: *const u32, count: u64, out: *mut u64) {
     let h = unsafe { &*h };

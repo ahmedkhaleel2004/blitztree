@@ -16,12 +16,20 @@ nonisolated struct CleanupItem: Identifiable, Sendable {
 }
 
 nonisolated enum Cleanup {
+    /// Smallest folder worth listing; the same as `MIN_BYTES` in cleanup.rs.
+    static let minBytes: UInt64 = 50_000_000
+
     /// The Rust engine selects candidates for both the panel and JSON CLI.
     /// Swift only supplies presentation paths; rules and labels live in cleanup.rs.
+    /// The engine picks and orders folders by their size with clones counted
+    /// once; the panel shows what deleting frees, which can be less, so it
+    /// drops folders that fall under the cutoff and orders by that figure.
+    /// Reads partly cloned files' attributes: call it off the main thread.
     static func find(in tree: Tree) -> [CleanupItem] {
         let home = NSHomeDirectory()
         let freed = tree.reclaimable(Array(UnsafeBufferPointer(start: tree.cleanupNodes, count: tree.cleanupCount)))
-        return (0..<tree.cleanupCount).map { index in
+        let items = (0..<tree.cleanupCount).compactMap { index -> CleanupItem? in
+            guard freed[index] >= minBytes else { return nil }
             let node = Int(tree.cleanupNodes[index])
             let path = tree.path(node)
             var display = tree.displayPath(node)
@@ -29,6 +37,8 @@ nonisolated enum Cleanup {
             return CleanupItem(node: node, path: path, display: display,
                                kind: tree.cleanupDescription(index), bytes: freed[index])
         }
+        // Stable, so equal sizes keep the engine's path order.
+        return items.enumerated().sorted { ($0.element.bytes, $1.offset) > ($1.element.bytes, $0.offset) }.map(\.element)
     }
 }
 
