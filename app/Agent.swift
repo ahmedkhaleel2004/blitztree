@@ -605,7 +605,7 @@ final class AgentRun {
 
     private var process: Process?
     private let scanRoot: String
-    private let tree: Tree
+    private var tree: Tree
     private let onFinish: () -> Void
     private var preparationTask: Task<Void, Never>?
 
@@ -637,7 +637,13 @@ final class AgentRun {
     func highlights(in shown: Tree?) -> [Int] {
         guard shown === tree, phase != .done else { return [] }
         return items.filter { $0.selected && $0.blocked == nil && $0.status != .done }
-            .flatMap(\.nodes)
+            .flatMap(\.nodes).filter { !tree.isRemoved($0) }
+    }
+
+    /// The tree on screen lost an item to Move to Trash. Node IDs keep their
+    /// meaning, so the plan's highlights carry over.
+    func adopt(_ pruned: Tree, replacing old: Tree) {
+        if tree === old { tree = pruned }
     }
 
     /// What step one moves to the Trash (tool caches wait for step two).

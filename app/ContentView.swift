@@ -465,6 +465,8 @@ struct OutlinePanel: NSViewRepresentable {
                     && zip(roots, childIDs).allSatisfy { item, id in
                         item.canRebind(to: Int(id), in: t) && outline?.isItemExpanded(item) == false
                     }
+                // After Move to Trash, node IDs still mean the same items.
+                let sameScan = t !== tree && tree?.scanID == t.scanID && model.viewRoot == viewRoot
                 tree = t
                 viewRoot = model.viewRoot
                 let started = Date()
@@ -481,6 +483,22 @@ struct OutlinePanel: NSViewRepresentable {
                             }
                         }
                     }
+                } else if sameScan, let outline {
+                    // Reopen the same folders at the same scroll position.
+                    let open = Set((0..<outline.numberOfRows).compactMap { row in
+                        (outline.item(atRow: row) as? Item).flatMap { outline.isItemExpanded($0) ? $0.id : nil }
+                    })
+                    let origin = outline.enclosingScrollView?.contentView.bounds.origin
+                    roots = childIDs.map { Item(id: Int($0), tree: t) }
+                    outline.reloadData()
+                    func expand(_ items: [Item]) {
+                        for item in items where open.contains(item.id) {
+                            outline.expandItem(item)
+                            expand(item.children)
+                        }
+                    }
+                    expand(roots)
+                    if let origin { outline.scroll(origin) }
                 } else {
                     roots = childIDs.map { Item(id: Int($0), tree: t) }
                     outline?.reloadData()

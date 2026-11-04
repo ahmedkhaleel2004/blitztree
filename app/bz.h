@@ -14,7 +14,7 @@ const uint32_t *bz_parents(BzScan *h);
 const uint64_t *bz_alloc(BzScan *h);
 const uint64_t *bz_logical(BzScan *h);
 const uint32_t *bz_nfiles(BzScan *h);
-const uint8_t *bz_flags(BzScan *h); // bit0 = is_dir
+const uint8_t *bz_flags(BzScan *h); // bit0 = is_dir, bit1 = moved to the Trash (see bz_without)
 const uint32_t *bz_child_off(BzScan *h); // length N+1
 const uint32_t *bz_children(BzScan *h);
 const uint32_t *bz_name_off(BzScan *h); // length N+1
@@ -27,6 +27,11 @@ uint64_t bz_cleanup_count(BzScan *h);
 const uint32_t *bz_cleanup_nodes(BzScan *h);
 // index is a candidate-list index, not a tree node index. NULL out of range.
 const char *bz_cleanup_description(BzScan *h, uint64_t index);
+
+// A new, finished handle: the tree without `node` and its contents, sizes
+// taken off its ancestors, node indices unchanged, Clean Up found again.
+// NULL for the root or an out-of-range node. Free it with bz_free.
+BzScan *bz_without(BzScan *h, uint32_t node);
 
 void bz_free(BzScan *h);
 
