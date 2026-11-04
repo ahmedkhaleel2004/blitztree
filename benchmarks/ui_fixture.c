@@ -64,6 +64,8 @@ const uint32_t *bz_cleanup_nodes(BzScan *h) { return h->cleanup_nodes; }
 const char *bz_cleanup_description(BzScan *h, uint64_t index) {
     return index < h->cleanup_count ? h->cleanup_descriptions[index] : NULL;
 }
+// The benchmarks never move anything to the Trash.
+BzScan *bz_without(BzScan *h, uint32_t node) { (void)h; (void)node; return NULL; }
 void bz_free(BzScan *h) {
     if (!h) return;
     for (uint32_t i = 0; i < h->cleanup_count; ++i) free(h->cleanup_descriptions[i]);

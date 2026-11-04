@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+- Right-click or Control-click a file or folder in the list for the same menu as the treemap: Reveal in Finder, Copy Path, and Move to Trash.
+- Control-click a file in the treemap, or a file or folder in the rings, for the same menu as right-click.
+- Move to Trash from that menu takes the item out of the list, the map and the totals right away, without a rescan. If it can't be moved, BlitzTree says why instead of doing nothing.
+
 ## 0.5.6 — 2026-09-27
 
 - BlitzTree updates itself. It checks GitHub for a new release once a day, downloads it in the background and installs it when you quit. Check for Updates… is in the BlitzTree menu. Updates are signed, and Full Disk Access carries over.

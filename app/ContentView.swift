@@ -465,6 +465,8 @@ struct OutlinePanel: NSViewRepresentable {
                     && zip(roots, childIDs).allSatisfy { item, id in
                         item.canRebind(to: Int(id), in: t) && outline?.isItemExpanded(item) == false
                     }
+                // After Move to Trash, node IDs still mean the same items.
+                let sameScan = t !== tree && tree?.scanID == t.scanID && model.viewRoot == viewRoot
                 tree = t
                 viewRoot = model.viewRoot
                 let started = Date()
@@ -481,9 +483,29 @@ struct OutlinePanel: NSViewRepresentable {
                             }
                         }
                     }
+                } else if sameScan, let outline {
+                    // Reopen the same folders at the same scroll position.
+                    let open = Set((0..<outline.numberOfRows).compactMap { row in
+                        (outline.item(atRow: row) as? Item).flatMap { outline.isItemExpanded($0) ? $0.id : nil }
+                    })
+                    let origin = outline.enclosingScrollView?.contentView.bounds.origin
+                    roots = childIDs.map { Item(id: Int($0), tree: t) }
+                    outline.reloadData()
+                    func expand(_ items: [Item]) {
+                        for item in items where open.contains(item.id) {
+                            outline.expandItem(item)
+                            expand(item.children)
+                        }
+                    }
+                    expand(roots)
+                    // reloadData keeps the old row number selected, which may now
+                    // be another item; syncSelection reselects the model's.
+                    outline.deselectAll(nil)
+                    if let origin { outline.scroll(origin) }
                 } else {
                     roots = childIDs.map { Item(id: Int($0), tree: t) }
                     outline?.reloadData()
+                    outline?.deselectAll(nil)
                 }
                 if ProcessInfo.processInfo.environment["BZ_TIMING"] != nil {
                     NSLog("BZ list reload: %.1f ms", -started.timeIntervalSinceNow * 1000)
@@ -642,10 +664,22 @@ struct OutlinePanel: NSViewRepresentable {
         }
     }
 
+    /// Right-click, Control-click and VoiceOver's show-menu action all ask
+    /// `menu(for:)`, so the list shows the treemap's menu for each.
+    final class Outline: NSOutlineView {
+        override func menu(for event: NSEvent) -> NSMenu? {
+            let row = self.row(at: convert(event.locationInWindow, from: nil))
+            guard row >= 0, let it = item(atRow: row) as? Item else { return nil }
+            window?.makeFirstResponder(self)
+            selectRowIndexes([row], byExtendingSelection: false)
+            return NodeMenu.make(path: it.tree.path(it.id))
+        }
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
-        let outline = NSOutlineView()
+        let outline = Outline()
         outline.style = .plain
         outline.rowSizeStyle = .default
         outline.usesAlternatingRowBackgroundColors = true

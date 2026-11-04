@@ -165,6 +165,27 @@ pub extern "C" fn bz_errors(h: *mut BzScan) -> u64 {
     h.flat.as_ref().map_or(0, |f| f.tree.errors)
 }
 
+/// A new, finished handle holding the tree without `node` (see
+/// `Tree::without`), with Clean Up's candidates found again. Null when `h`
+/// has no tree, or `node` is the root or out of range. Free it with bz_free.
+///
+/// # Safety
+/// `h` must be a live scan handle, with no concurrent mutation or free.
+#[no_mangle]
+pub unsafe extern "C" fn bz_without(h: *mut BzScan, node: u32) -> *mut BzScan {
+    let h = unsafe { &*h };
+    let node = node as usize;
+    match h.flat.as_ref() {
+        Some(f) if node != 0 && node < f.tree.len() => Box::into_raw(Box::new(BzScan {
+            progress: Arc::new(Progress::default()),
+            done: Arc::new(AtomicBool::new(true)),
+            result: Arc::new(std::sync::Mutex::new(None)),
+            flat: Some(Box::new(with_cleanup(f.tree.without(node)))),
+        })),
+        _ => std::ptr::null_mut(),
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn bz_free(h: *mut BzScan) {
     if !h.is_null() {
@@ -204,5 +225,37 @@ mod tests {
             }
             assert!(unsafe { bz_cleanup_description(h, expected.len() as u64) }.is_null());
         }
+    }
+
+    #[test]
+    fn without_returns_a_finished_handle_with_candidates_found_again() {
+        let bytes = cleanup::MIN_BYTES;
+        let mut tree = Tree::with_root("/root");
+        tree.push("node_modules", 0, bytes, bytes, true);
+        tree.push("notes.txt", 0, 10, 10, false);
+        crate::finish(&mut tree);
+        let mut handle = BzScan {
+            progress: Arc::new(Progress::default()),
+            done: Arc::new(AtomicBool::new(true)),
+            result: Arc::new(std::sync::Mutex::new(None)),
+            flat: Some(Box::new(with_cleanup(tree))),
+        };
+        let h = &mut handle as *mut BzScan;
+        assert_eq!(unsafe { bz_cleanup_count(h) }, 1);
+        for bad in [0, 3, u32::MAX] {
+            assert!(unsafe { bz_without(h, bad) }.is_null());
+        }
+        let pruned = unsafe { bz_without(h, 1) };
+        assert!(!pruned.is_null());
+        assert_eq!(bz_take_tree(pruned), 3);
+        assert_eq!(unsafe { bz_cleanup_count(pruned) }, 0);
+        let alloc = unsafe { std::slice::from_raw_parts(bz_alloc(pruned), 3) };
+        assert_eq!(alloc[0], 10);
+        let flags = unsafe { std::slice::from_raw_parts(bz_flags(pruned), 3) };
+        // Bit 1 (value 2) is what bz.h documents and Swift's Tree.isRemoved tests.
+        assert_eq!(flags, [1, 3, 0]);
+        // The original handle is untouched.
+        assert_eq!(unsafe { bz_cleanup_count(h) }, 1);
+        bz_free(pruned);
     }
 }
