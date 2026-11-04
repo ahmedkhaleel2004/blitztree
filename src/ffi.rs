@@ -252,7 +252,8 @@ mod tests {
         let alloc = unsafe { std::slice::from_raw_parts(bz_alloc(pruned), 3) };
         assert_eq!(alloc[0], 10);
         let flags = unsafe { std::slice::from_raw_parts(bz_flags(pruned), 3) };
-        assert_eq!(flags, [1, 1 | crate::REMOVED, 0]);
+        // Bit 1 (value 2) is what bz.h documents and Swift's Tree.isRemoved tests.
+        assert_eq!(flags, [1, 3, 0]);
         // The original handle is untouched.
         assert_eq!(unsafe { bz_cleanup_count(h) }, 1);
         bz_free(pruned);

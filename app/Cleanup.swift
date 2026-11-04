@@ -89,7 +89,9 @@ struct CleanupPanel: View {
                     .transition(.opacity)
             }
         }
-        .confirmationDialog(picked.count == 1 ? "Move 1 folder to the Trash?" : "Move \(picked.count) folders to the Trash?", isPresented: $confirming) {
+        // Move to Trash from a menu takes items out of the list; drop their picks.
+        .onChange(of: model.cleanup.map(\.id)) { _, ids in picked.formIntersection(ids) }
+        .confirmationDialog(pickedItems.count == 1 ? "Move 1 folder to the Trash?" : "Move \(pickedItems.count) folders to the Trash?", isPresented: $confirming) {
             Button("Move to Trash (\(Fmt.size(pickedBytes)))", role: .destructive) { trashPicked() }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -154,13 +156,13 @@ struct CleanupPanel: View {
                 Button {
                     confirming = true
                 } label: {
-                    Text(picked.isEmpty ? "Select folders to clean up"
-                         : "Move \(picked.count) to Trash · \(Fmt.size(pickedBytes))")
+                    Text(pickedItems.isEmpty ? "Select folders to clean up"
+                         : "Move \(pickedItems.count) to Trash · \(Fmt.size(pickedBytes))")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                .disabled(picked.isEmpty || model.scanning || model.cleanupTrash.running)
+                .disabled(pickedItems.isEmpty || model.scanning || model.cleanupTrash.running)
             }
             .padding(12)
         }
