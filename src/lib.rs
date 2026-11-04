@@ -89,6 +89,10 @@ pub struct Tree {
     pub name_off: Vec<u32>,
     pub name_blob: Vec<u8>,
     pub errors: u64,
+    /// Every file with more than one link, as (device, inode, node), sorted.
+    /// Only the link whose path sorts first carries the bytes; `without`
+    /// uses this to hand them to a link that stays. Not part of the C ABI.
+    pub hardlinks: Vec<(u32, u64, u32)>,
 }
 
 impl Tree {
@@ -162,6 +166,33 @@ impl Tree {
             t.flags[i] |= REMOVED;
             stack.extend(self.kids(i).iter().map(|&c| c as usize));
         }
+        // A hard-linked file's bytes sit on one link. If that link is gone
+        // and another stays, the one a rescan would credit gets them back.
+        for group in self.hardlinks.chunk_by(|x, y| (x.0, x.1) == (y.0, y.1)) {
+            // Links removed earlier keep their old sizes; skip them.
+            let Some(owner) = group.iter().map(|g| g.2 as usize)
+                .find(|&i| self.flags[i] & REMOVED == 0 && (self.alloc[i] != 0 || self.logical[i] != 0))
+            else { continue };
+            if t.flags[owner] & REMOVED == 0 {
+                continue;
+            }
+            let heir = group.iter().map(|g| g.2 as usize).filter(|&i| t.flags[i] & REMOVED == 0)
+                .min_by(|&x, &y| self.path_parts(x as u32).cmp(&self.path_parts(y as u32)));
+            let Some(heir) = heir else { continue };
+            let (a, l) = (self.alloc[owner], self.logical[owner]);
+            t.alloc[heir] += a;
+            t.logical[heir] += l;
+            let mut p = self.parents[heir];
+            while p != NO_PARENT {
+                let i = p as usize;
+                t.alloc[i] += a;
+                t.logical[i] += l;
+                ancestors.push(i);
+                p = self.parents[i];
+            }
+        }
+        ancestors.sort_unstable();
+        ancestors.dedup();
         let parent = self.parents[node] as usize;
         let at = self.child_off[parent] as usize
             + self.kids(parent).iter().position(|&c| c as usize == node).expect("parent lists its child");
@@ -432,6 +463,7 @@ impl Arena {
         let Some(key) = hardlink else {
             return t.alloc[i as usize];
         };
+        t.hardlinks.push((key.0, key.1, i));
         let Some(&previous) = self.hardlinks.get(&key) else {
             self.hardlinks.insert(key, i);
             return t.alloc[i as usize];
@@ -696,6 +728,7 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
     let t1 = std::time::Instant::now();
     let mut tree = shared.arena.into_inner().unwrap().tree;
     finish(&mut tree);
+    tree.hardlinks.sort_unstable();
     tree.errors = progress.errors.load(Ordering::Relaxed);
     if std::env::var_os("BZ_TIMING").is_some() {
         eprintln!(
@@ -1046,6 +1079,78 @@ mod tests {
             finish(t);
             assert_eq!((t.alloc[0], t.logical[0], t.n_files[0]), (4096, 8192, 3));
         }
+    }
+
+    #[test]
+    fn without_hands_a_hard_links_bytes_to_the_link_that_stays() {
+        let mut tree = Tree::with_root("/root");
+        tree.push("a", 0, 0, 0, true); // 1
+        tree.push("b", 0, 0, 0, true); // 2
+        tree.push("c", 0, 0, 0, true); // 3
+        tree.push("y", 1, 8192, 4096, false); // 4: /root/a/y, first, carries the bytes
+        tree.push("w", 2, 1000, 1000, false); // 5: /root/b/w, a plain file
+        tree.push("z", 2, 0, 0, true); // 6: /root/b/z
+        tree.push("v", 3, 8192, 4096, false); // 7: /root/c/v
+        tree.push("x", 6, 8192, 4096, false); // 8: /root/b/z/x, second
+        let mut arena = Arena { tree, hardlinks: HashMap::new() };
+        for i in [4, 7, 8] {
+            arena.account_file(i, Some((7, 42)));
+        }
+        let mut t = arena.tree;
+        finish(&mut t);
+        t.hardlinks.sort_unstable();
+        let dirs = |t: &Tree| [0, 1, 2, 3, 6].map(|i| t.alloc[i]);
+        assert_eq!(dirs(&t), [5096, 4096, 1000, 0, 0]);
+        assert_eq!(names_of(&t, 2), ["w", "z"]);
+        // A rescan would credit /root/b/z/x, the first path left. Its folders
+        // grow, and z moves past w though nothing under b was trashed.
+        let t = t.without(4);
+        assert_eq!(dirs(&t), [5096, 0, 5096, 0, 4096]);
+        assert_eq!((t.alloc[8], t.logical[8], t.logical[0]), (4096, 8192, 9192));
+        assert_eq!((t.n_files[0], t.n_files[1]), (3, 0));
+        assert_eq!(names_of(&t, 2), ["z", "w"]);
+        assert_eq!(names_of(&t, 0), ["b", "a", "c"]);
+        // Trashing a link without the bytes changes no sizes. The earlier
+        // owner keeps its old size but is flagged, so it isn't credited again.
+        let t = t.without(7);
+        assert_eq!(dirs(&t), [5096, 0, 5096, 0, 4096]);
+        assert_eq!(t.n_files[0], 2);
+        // The last link goes: nothing is left to credit.
+        let t = t.without(6);
+        assert_eq!(dirs(&t)[..3], [1000, 0, 1000]);
+        assert_eq!((t.logical[0], t.n_files[0]), (1000, 1));
+    }
+
+    fn names_of(t: &Tree, i: usize) -> Vec<&str> {
+        t.kids(i).iter().map(|&c| t.name(c as usize)).collect()
+    }
+
+    #[test]
+    fn without_matches_a_rescan_when_a_hard_link_goes() {
+        let root = std::env::temp_dir().join(format!("bz-test-without-links-{}", std::process::id()));
+        let build = || {
+            let _ = std::fs::remove_dir_all(&root);
+            std::fs::create_dir_all(root.join("b")).unwrap();
+            std::fs::create_dir_all(root.join("c")).unwrap();
+            std::fs::write(root.join("a"), vec![7u8; 1 << 20]).unwrap();
+            std::fs::hard_link(root.join("a"), root.join("b/link")).unwrap();
+            std::fs::hard_link(root.join("a"), root.join("c/link")).unwrap();
+        };
+        for gone in ["a", "b/link", "b", "c"] {
+            build();
+            let full = scan(&root, &Progress::default());
+            let t = full.without(find(&full, gone));
+            let path = root.join(gone);
+            if path.is_dir() {
+                std::fs::remove_dir_all(&path).unwrap();
+            } else {
+                std::fs::remove_file(&path).unwrap();
+            }
+            let rescan = scan(&root, &Progress::default());
+            assert_same_shape(&t, 0, &rescan, 0);
+            assert_eq!(t.alloc[0], rescan.alloc[0], "{gone}");
+        }
+        let _ = std::fs::remove_dir_all(&root);
     }
 
     #[test]

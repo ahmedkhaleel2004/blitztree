@@ -498,10 +498,14 @@ struct OutlinePanel: NSViewRepresentable {
                         }
                     }
                     expand(roots)
+                    // reloadData keeps the old row number selected, which may now
+                    // be another item; syncSelection reselects the model's.
+                    outline.deselectAll(nil)
                     if let origin { outline.scroll(origin) }
                 } else {
                     roots = childIDs.map { Item(id: Int($0), tree: t) }
                     outline?.reloadData()
+                    outline?.deselectAll(nil)
                 }
                 if ProcessInfo.processInfo.environment["BZ_TIMING"] != nil {
                     NSLog("BZ list reload: %.1f ms", -started.timeIntervalSinceNow * 1000)

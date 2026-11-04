@@ -273,11 +273,12 @@ final class ScanModel {
         let previous = removals
         removals = Task {
             await previous?.value
-            // A whole-disk window names /Users/… as /System/Volumes/Data/Users/…;
-            // a window scanned at /Users/… knows it by the short name.
+            // /Users/… and /System/Volumes/Data/Users/… are the same folder.
+            // The window that trashed it may know it by either name, and
+            // this one may have been scanned at either.
             let data = "/System/Volumes/Data"
-            let short = path.hasPrefix(data + "/") ? String(path.dropFirst(data.count)) : nil
-            guard !scanning, let tree, let node = tree.node(at: path) ?? short.flatMap(tree.node(at:)), node != 0
+            let other = path.hasPrefix(data + "/") ? String(path.dropFirst(data.count)) : data + path
+            guard !scanning, let tree, let node = tree.node(at: path) ?? tree.node(at: other), node != 0
             else { return }
             let result = await Task.detached(priority: .userInitiated) { () -> (Tree, [CleanupItem])? in
                 guard let pruned = tree.without(node) else { return nil }
