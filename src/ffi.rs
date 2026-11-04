@@ -119,6 +119,7 @@ macro_rules! getter {
 
 getter!(bz_parents, parents, u32);
 getter!(bz_alloc, alloc, u64);
+getter!(bz_unique, unique, u64);
 getter!(bz_logical, logical, u64);
 getter!(bz_nfiles, n_files, u32);
 getter!(bz_flags, flags, u8);
@@ -144,6 +145,31 @@ pub unsafe extern "C" fn bz_cleanup_nodes(h: *mut BzScan) -> *const u32 {
     h.flat
         .as_ref()
         .map_or(std::ptr::null(), |f| f.cleanup_nodes.as_ptr())
+}
+
+/// Write what deleting each of `count` nodes would free (see
+/// `Tree::reclaimable`) to `out`. The nodes must not contain one another.
+/// This asks the file system about partly cloned files, so prefer calling
+/// it off the main thread; it only reads the tree.
+///
+/// # Safety
+/// `h` must be a live scan handle, with no concurrent mutation or free.
+/// `nodes` and `out` must each have room for `count` elements. If any node
+/// is out of range, `out` is left untouched.
+#[no_mangle]
+pub unsafe extern "C" fn bz_reclaimable(h: *mut BzScan, nodes: *const u32, count: u64, out: *mut u64) {
+    let h = unsafe { &*h };
+    if count == 0 || nodes.is_null() || out.is_null() {
+        return;
+    }
+    if let Some(f) = h.flat.as_ref() {
+        let nodes = unsafe { std::slice::from_raw_parts(nodes, count as usize) };
+        if nodes.iter().any(|&n| n as usize >= f.tree.len()) {
+            return;
+        }
+        let freed = f.tree.reclaimable(nodes);
+        unsafe { std::ptr::copy_nonoverlapping(freed.as_ptr(), out, freed.len()) };
+    }
 }
 
 /// Label at a candidate-list index (not a tree node index), valid until bz_free.
@@ -183,7 +209,7 @@ mod tests {
         for bytes in [0, cleanup::MIN_BYTES] {
             let mut tree = Tree::with_root("/root");
             tree.push("node_modules", 0, bytes, bytes, true);
-            (tree.alloc[0], tree.logical[0]) = (bytes, bytes);
+            (tree.alloc[0], tree.unique[0], tree.logical[0]) = (bytes, bytes, bytes);
             tree.link_children();
             assert_eq!(tree.parents, [NO_PARENT, 0]);
             let expected = cleanup::find(&tree, cleanup::MIN_BYTES);
@@ -197,8 +223,11 @@ mod tests {
             let h = &mut handle as *mut BzScan;
             assert_eq!(unsafe { bz_cleanup_count(h) } as usize, expected.len());
             let nodes = unsafe { std::slice::from_raw_parts(bz_cleanup_nodes(h), expected.len()) };
+            let mut freed = vec![0u64; expected.len()];
+            unsafe { bz_reclaimable(h, nodes.as_ptr(), nodes.len() as u64, freed.as_mut_ptr()) };
             for (i, candidate) in expected.iter().enumerate() {
                 assert_eq!(nodes[i], candidate.node);
+                assert_eq!(freed[i], unsafe { *bz_unique(h).add(candidate.node as usize) });
                 let label = unsafe { CStr::from_ptr(bz_cleanup_description(h, i as u64)) };
                 assert_eq!(label.to_str().unwrap(), candidate.kind.description());
             }

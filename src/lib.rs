@@ -9,8 +9,8 @@ pub mod ffi;
 pub mod searchfs;
 
 use std::cell::RefCell;
-use std::collections::HashMap;
-use std::ffi::{c_int, c_void, CStr, CString};
+use std::collections::{HashMap, HashSet};
+use std::ffi::{c_char, c_int, c_void, CStr, CString};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Mutex;
@@ -36,6 +36,13 @@ extern "C" {
         attr_buf_size: usize,
         options: u64,
     ) -> c_int;
+    fn getattrlist(
+        path: *const c_char,
+        attr_list: *mut AttrList,
+        attr_buf: *mut c_void,
+        attr_buf_size: usize,
+        options: u32,
+    ) -> c_int;
 }
 
 const ATTR_BIT_MAP_COUNT: u16 = 5;
@@ -51,6 +58,16 @@ const DIR_MNTSTATUS_MNTPOINT: u32 = 0x0000_0001;
 const ATTR_FILE_LINKCOUNT: u32 = 0x0000_0001;
 const ATTR_FILE_TOTALSIZE: u32 = 0x0000_0002;
 const ATTR_FILE_ALLOCSIZE: u32 = 0x0000_0004;
+/// Extended common attributes: requested in `forkattr`, and only with this option.
+const FSOPT_ATTR_CMN_EXTENDED: u32 = 0x0000_0020;
+const FSOPT_NOFOLLOW: u32 = 0x0000_0001;
+const ATTR_CMNEXT_PRIVATESIZE: u32 = 0x0000_0008;
+const ATTR_CMNEXT_CLONEID: u32 = 0x0000_0100;
+const ATTR_CMNEXT_EXT_FLAGS: u32 = 0x0000_0200;
+/// sys/stat.h: the file may share blocks with another file (an APFS clone).
+const EF_MAY_SHARE_BLOCKS: u64 = 0x0000_0001;
+/// sys/stat.h: the file shares all of its blocks with another file.
+const EF_SHARES_ALL_BLOCKS: u64 = 0x0000_0040;
 
 const VDIR: u32 = 2;
 /// Contents live in the cloud (iCloud Drive, File Provider). Opening such a
@@ -65,12 +82,23 @@ pub const NO_PARENT: u32 = u32::MAX;
 
 /// The finished tree as flat arrays, the layout the Swift UI reads in place
 /// (see app/bz.h). Node 0 is the root; children come after their parent.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CloneGroup {
+    pub end: u32,
+    /// Bytes every member shares, counted once (toward the first member).
+    pub shared: u64,
+}
+
 #[derive(Default)]
 #[cfg_attr(test, derive(Debug, PartialEq, Eq))]
 pub struct Tree {
     pub parents: Vec<u32>,
     /// Allocated (on-disk) bytes; subtree totals for directories.
     pub alloc: Vec<u64>,
+    /// Allocated bytes with APFS clones counted once: the blocks a family of
+    /// clones shares count toward one member, the other members count none.
+    /// Subtree totals for directories. `alloc - unique` is a node's cloned bytes.
+    pub unique: Vec<u64>,
     /// Logical bytes; subtree totals for directories.
     pub logical: Vec<u64>,
     /// Subtree file count for directories, 0 for files.
@@ -80,12 +108,20 @@ pub struct Tree {
     /// anywhere in this subtree. The observed sizes then describe a partial walk.
     pub complete: Vec<bool>,
     /// Node i's children are children[child_off[i]..child_off[i + 1]],
-    /// largest allocated size first (treemap layout order).
+    /// largest unique size first (treemap layout order).
     pub child_off: Vec<u32>,
     pub children: Vec<u32>,
     /// Node i's name is name_blob[name_off[i]..name_off[i + 1]], UTF-8.
     pub name_off: Vec<u32>,
     pub name_blob: Vec<u8>,
+    /// Files that share all of their blocks with APFS clones, by clone
+    /// family: group g is clone_members[clone_groups[g - 1].end..clone_groups[g].end],
+    /// the member counted with the shared bytes first.
+    pub clone_members: Vec<u32>,
+    pub clone_groups: Vec<CloneGroup>,
+    /// Files that share only some of their blocks, with a file they were
+    /// cloned from or into. That file is unknown, so these count in full.
+    pub partial_clones: Vec<u32>,
     pub errors: u64,
 }
 
@@ -120,6 +156,47 @@ impl Tree {
             path.push(part);
         }
         path
+    }
+    /// Bytes this node shares with APFS clones that are counted elsewhere.
+    pub fn cloned(&self, i: usize) -> u64 {
+        self.alloc[i] - self.unique[i]
+    }
+    /// What deleting each of `roots` (disjoint subtrees) would free, as far as
+    /// APFS clones go: for files that share blocks with a clone, only their
+    /// private size counts. Shared blocks never count as freed, even when every
+    /// clone the scan found is inside, because a clone that has since been
+    /// changed (outside the scan or not) can still hold them and APFS doesn't
+    /// say which file it is. Asks the file system for private sizes, so call it
+    /// off the main thread; an unknown private size counts as not freed. Hard
+    /// links and snapshots are not considered.
+    pub fn reclaimable(&self, roots: &[u32]) -> Vec<u64> {
+        let mut out: Vec<u64> = roots.iter().map(|&r| self.unique[r as usize]).collect();
+        let slot: HashMap<u32, usize> = roots.iter().enumerate().map(|(k, &r)| (r, k)).collect();
+        let inside = |mut i: u32| loop {
+            if let Some(&k) = slot.get(&i) {
+                return Some(k);
+            }
+            if i == NO_PARENT {
+                return None;
+            }
+            i = self.parents[i as usize];
+        };
+        // Full clones have no private blocks: take the shared bytes back off
+        // the member that counted them.
+        let mut start = 0;
+        for g in &self.clone_groups {
+            let owner = self.clone_members[start as usize];
+            start = g.end;
+            if let Some(k) = inside(owner) {
+                out[k] -= g.shared.min(out[k]);
+            }
+        }
+        for &i in &self.partial_clones {
+            let Some(k) = inside(i) else { continue };
+            let private = private_size(&self.path(i as usize)).unwrap_or(0);
+            out[k] -= self.unique[i as usize].saturating_sub(private).min(out[k]);
+        }
+        out
     }
     /// Path components from the root, compared as `str`s compare (bytewise).
     fn path_parts(&self, mut i: u32) -> Vec<&[u8]> {
@@ -159,6 +236,44 @@ struct Entry {
     alloc: u64,
     /// `(device, file id)` when the file has more than one hard link.
     hardlink: Option<(u32, u64)>,
+    /// Set when the file may share blocks with an APFS clone.
+    clone: Option<CloneInfo>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CloneInfo {
+    /// `(device, clone id)`. Full clones of one file share its clone id; a
+    /// clone that has since been changed gets its own.
+    key: (u32, u64),
+    file_id: u64,
+    /// Every block is shared with another file (so none is private).
+    shares_all: bool,
+}
+
+/// The bytes of `path` no other file shares (ATTR_CMNEXT_PRIVATESIZE), read
+/// with getattrlist(2).
+fn private_size(path: &Path) -> Option<u64> {
+    let attr = ATTR_CMNEXT_PRIVATESIZE;
+    let path = CString::new(path.as_os_str().as_encoded_bytes()).ok()?;
+    let mut attrlist = AttrList {
+        bitmapcount: ATTR_BIT_MAP_COUNT,
+        reserved: 0,
+        commonattr: ATTR_CMN_RETURNED_ATTRS,
+        volattr: 0,
+        dirattr: 0,
+        fileattr: 0,
+        forkattr: attr,
+    };
+    let mut buf = [0u8; 4 + 20 + 8];
+    let options = FSOPT_ATTR_CMN_EXTENDED | FSOPT_NOFOLLOW;
+    let status = unsafe {
+        getattrlist(path.as_ptr(), &mut attrlist, buf.as_mut_ptr() as *mut c_void, buf.len(), options)
+    };
+    if status != 0 || u32_at(&buf, 4 + 16) & attr == 0 {
+        return None;
+    }
+    // An off_t, after the length and the returned attribute set.
+    Some(i64_at(&buf, 24).max(0) as u64)
 }
 
 impl Entry {
@@ -218,7 +333,10 @@ fn read_dir_bulk(path: &CStr, s: &mut Scratch, progress: &Progress) -> Option<bo
         volattr: 0,
         dirattr: ATTR_DIR_MOUNTSTATUS,
         fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE,
-        forkattr: 0,
+        // Extended common attributes; volumes other than APFS leave them out.
+        // PRIVATESIZE is not asked for here: it made scans 3x slower, and
+        // EXT_FLAGS already says when a file shares all of its blocks.
+        forkattr: ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_EXT_FLAGS,
     };
 
     let mut complete = true;
@@ -229,7 +347,7 @@ fn read_dir_bulk(path: &CStr, s: &mut Scratch, progress: &Progress) -> Option<bo
                 &mut attrlist,
                 s.buf.as_mut_ptr() as *mut c_void,
                 BUF_SIZE,
-                0,
+                FSOPT_ATTR_CMN_EXTENDED as u64,
             )
         };
         if n <= 0 {
@@ -265,13 +383,15 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
 /// Parse one getattrlistbulk entry. Attribute order within an entry is fixed:
 /// RETURNED_ATTRS, ERROR, then common attrs by bit (NAME, DEVID, OBJTYPE,
 /// FLAGS, FILEID), then dir attrs (MOUNTSTATUS), then file attrs (LINKCOUNT,
-/// TOTALSIZE, ALLOCSIZE). Dir attrs come back only for directories and file
-/// attrs only for files. False (and counted) if the entry had to be dropped.
+/// TOTALSIZE, ALLOCSIZE), then extended common attrs (CLONEID, EXT_FLAGS).
+/// Dir attrs come back only for directories and file attrs only for files.
+/// False (and counted) if the entry had to be dropped.
 fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &Progress) -> bool {
     let mut off = 4usize; // skip length
     let ret_common = u32_at(e, off);
     let ret_dir = u32_at(e, off + 8);
     let ret_file = u32_at(e, off + 12);
+    let ret_ext = u32_at(e, off + 16);
     off += 20; // attribute_set_t: 5 x u32
 
     if ret_common & ATTR_CMN_ERROR != 0 {
@@ -346,7 +466,26 @@ fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &P
     }
     if ret_file & ATTR_FILE_ALLOCSIZE != 0 {
         alloc = i64_at(e, off).max(0) as u64;
+        off += 8;
     }
+
+    let mut clone_id = None;
+    if ret_ext & ATTR_CMNEXT_CLONEID != 0 {
+        clone_id = Some(u64_at(e, off));
+        off += 8;
+    }
+    let mut ext_flags = 0u64;
+    if ret_ext & ATTR_CMNEXT_EXT_FLAGS != 0 {
+        ext_flags = u64_at(e, off);
+    }
+    let clone = match clone_id {
+        Some(id) if !is_dir && ext_flags & EF_MAY_SHARE_BLOCKS != 0 => Some(CloneInfo {
+            key: (dev, id),
+            file_id,
+            shares_all: ext_flags & EF_SHARES_ALL_BLOCKS != 0,
+        }),
+        _ => None,
+    };
 
     if name.is_empty() {
         return invalid_name();
@@ -360,6 +499,7 @@ fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &P
         size,
         alloc,
         hardlink: (!is_dir && links > 1).then_some((dev, file_id)),
+        clone,
     });
     true
 }
@@ -376,6 +516,10 @@ struct Arena {
     /// independently of worker scheduling. This is accounting, not an estimate
     /// of how many bytes deleting any one of its links would reclaim.
     hardlinks: HashMap<(u32, u64), u32>,
+    /// Files that may share blocks with a clone, resolved by `finish`.
+    clones: Vec<(CloneInfo, u32)>,
+    /// Clone families seen so far, so progress counts shared bytes once.
+    clone_keys: HashSet<(u32, u64)>,
 }
 
 impl Arena {
@@ -476,8 +620,17 @@ fn walk<'s>(scope: &rayon::Scope<'s>, shared: &'s Shared<'s>, path: CString, dir
             t.name_blob.extend_from_slice(names);
             let mut bytes = 0;
             for (k, e) in entries.iter().enumerate() {
-                if !e.is_dir {
-                    bytes += arena.account_file(base + k as u32, e.hardlink);
+                if e.is_dir {
+                    continue;
+                }
+                let i = base + k as u32;
+                let added = arena.account_file(i, e.hardlink);
+                if let Some(c) = e.clone {
+                    arena.clones.push((c, i));
+                    let counted = !c.shares_all || arena.clone_keys.insert(c.key);
+                    bytes += if counted { added } else { 0 };
+                } else {
+                    bytes += added;
                 }
             }
             (base, bytes)
@@ -513,22 +666,51 @@ fn runs(parents: &[u32]) -> Vec<(u32, u32, u32)> {
     out
 }
 
+/// Per-file unique sizes. A family of full clones counts its shared bytes
+/// once, toward the member with the lowest file id (so the result doesn't
+/// depend on scan order), and its other members count none. Files sharing
+/// only some blocks count in full. Hard-link names that `account_file`
+/// zeroed are not members.
+fn count_clones_once(t: &mut Tree, mut clones: Vec<(CloneInfo, u32)>) {
+    t.unique = t.alloc.clone();
+    t.clone_members.clear();
+    t.clone_groups.clear();
+    t.partial_clones.clear();
+    clones.retain(|&(_, i)| t.alloc[i as usize] > 0);
+    clones.sort_unstable_by_key(|&(c, i)| (!c.shares_all, c.key, c.file_id, i));
+    for group in clones.chunk_by(|a, b| (a.0.shares_all, a.0.key) == (b.0.shares_all, b.0.key)) {
+        if !group[0].0.shares_all {
+            t.partial_clones.extend(group.iter().map(|&(_, i)| i));
+            continue;
+        }
+        let shared = t.alloc[group[0].1 as usize];
+        for &(_, i) in &group[1..] {
+            t.unique[i as usize] = t.alloc[i as usize].saturating_sub(shared);
+        }
+        t.clone_members.extend(group.iter().map(|&(_, i)| i));
+        t.clone_groups.push(CloneGroup { end: t.clone_members.len() as u32, shared });
+    }
+}
+
 /// Derive subtree totals and the sorted child lists from the walk's arrays.
-fn finish(t: &mut Tree) {
+fn finish(t: &mut Tree, clones: Vec<(CloneInfo, u32)>) {
+    count_clones_once(t, clones);
     let runs = runs(&t.parents);
     // Bottom-up: a directory's run starts after its parent's run, so reverse
     // run order finishes every child before its parent.
     t.n_files = vec![0u32; t.len()];
     for &(p, first, len) in runs.iter().rev() {
-        let (mut a, mut l, mut f, mut c) = (0u64, 0u64, 0u32, true);
+        let (mut a, mut u, mut l, mut f, mut c) = (0u64, 0u64, 0u64, 0u32, true);
         for i in first as usize..(first + len) as usize {
             a += t.alloc[i];
+            u += t.unique[i];
             l += t.logical[i];
             f += if t.is_dir(i) { t.n_files[i] } else { 1 };
             c &= t.complete[i];
         }
         let p = p as usize;
         t.alloc[p] += a;
+        t.unique[p] += u;
         t.logical[p] += l;
         t.n_files[p] += f;
         t.complete[p] &= c;
@@ -554,7 +736,7 @@ fn link(t: &mut Tree, runs: &[(u32, u32, u32)]) {
         for (k, c) in kids.iter_mut().enumerate() {
             *c = first + k as u32;
         }
-        kids.sort_unstable_by_key(|&c| std::cmp::Reverse(t.alloc[c as usize]));
+        kids.sort_unstable_by_key(|&c| std::cmp::Reverse(t.unique[c as usize]));
     }
 }
 
@@ -571,6 +753,7 @@ impl Tree {
         self.parents.push(parent);
         self.logical.push(logical);
         self.alloc.push(alloc);
+        self.unique.push(alloc);
         self.flags.push(is_dir as u8);
         self.complete.push(true);
         self.name_blob.extend_from_slice(name.as_bytes());
@@ -630,6 +813,8 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
         arena: Mutex::new(Arena {
             tree,
             hardlinks: HashMap::new(),
+            clones: Vec::new(),
+            clone_keys: HashSet::new(),
         }),
         progress,
     };
@@ -648,8 +833,8 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
         shared.mark_incomplete(0);
     }
     let t1 = std::time::Instant::now();
-    let mut tree = shared.arena.into_inner().unwrap().tree;
-    finish(&mut tree);
+    let Arena { mut tree, clones, .. } = shared.arena.into_inner().unwrap();
+    finish(&mut tree, clones);
     tree.errors = progress.errors.load(Ordering::Relaxed);
     if std::env::var_os("BZ_TIMING").is_some() {
         eprintln!(
@@ -698,7 +883,15 @@ pub fn scan_count(root: &Path, progress: &Progress) {
 mod tests {
     use super::*;
 
-    fn bulk_record(name: &str, is_dir: bool, flags: u32, mount_status: u32, links: u32) -> Vec<u8> {
+    /// `extended`: (clone id, extended flags), as APFS returns them.
+    fn bulk_record(
+        name: &str,
+        is_dir: bool,
+        flags: u32,
+        mount_status: u32,
+        links: u32,
+        extended: Option<(u64, u64)>,
+    ) -> Vec<u8> {
         let mut e = vec![0u8; 4];
         let common = ATTR_CMN_RETURNED_ATTRS
             | ATTR_CMN_ERROR
@@ -713,7 +906,12 @@ mod tests {
         } else {
             ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE
         };
-        for value in [common, 0, dir, file, 0, 0] {
+        let ext = if extended.is_some() {
+            ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_EXT_FLAGS
+        } else {
+            0
+        };
+        for value in [common, 0, dir, file, ext, 0] {
             e.extend_from_slice(&value.to_le_bytes());
         }
         let name_ref = e.len();
@@ -728,6 +926,11 @@ mod tests {
             e.extend_from_slice(&links.to_le_bytes());
             e.extend_from_slice(&12345i64.to_le_bytes());
             e.extend_from_slice(&16384i64.to_le_bytes());
+        }
+        if let Some((clone_id, ext_flags)) = extended {
+            for value in [clone_id, ext_flags] {
+                e.extend_from_slice(&value.to_le_bytes());
+            }
         }
         let name_offset = (e.len() - name_ref) as u32;
         e[name_ref..name_ref + 4].copy_from_slice(&name_offset.to_le_bytes());
@@ -748,7 +951,7 @@ mod tests {
             ("plain", true, 0, 0, 1),
             ("linked-é", false, 0, 0, 2),
         ] {
-            let record = bulk_record(name, dir, flags, mount, links);
+            let record = bulk_record(name, dir, flags, mount, links, None);
             assert!(parse_entry(&record, &mut entries, &mut names, &Progress::default()));
         }
         assert_eq!(entries.len(), 4);
@@ -760,6 +963,26 @@ mod tests {
         assert_eq!(&names[entries[2].name_end as usize..], "linked-é".as_bytes());
         assert_eq!(entries[3].hardlink, Some((17, 123456)));
         assert_eq!((entries[3].size, entries[3].alloc), (12345, 16384));
+        assert!(entries.iter().all(|e| e.clone.is_none()), "no extended attributes, no sharing");
+    }
+
+    #[test]
+    fn bulk_parser_reads_clone_attributes_after_file_attributes() {
+        let (mut entries, mut names) = (Vec::new(), Vec::new());
+        for (name, ext) in [
+            ("full", (99, EF_MAY_SHARE_BLOCKS | EF_SHARES_ALL_BLOCKS)),
+            ("partial", (98, EF_MAY_SHARE_BLOCKS)),
+            ("not-shared", (97, 0)),
+        ] {
+            let record = bulk_record(name, false, 0, 0, 1, Some(ext));
+            assert!(parse_entry(&record, &mut entries, &mut names, &Progress::default()));
+        }
+        assert_eq!(&names[entries[1].name_end as usize..], b"not-shared", "name still found");
+        assert_eq!((entries[0].size, entries[0].alloc), (12345, 16384));
+        let info = |id, shares_all| Some(CloneInfo { key: (17, id), file_id: 123456, shares_all });
+        assert_eq!(entries[0].clone, info(99, true));
+        assert_eq!(entries[1].clone, info(98, false));
+        assert_eq!(entries[2].clone, None);
     }
 
     /// Every child is listed once, under its parent, after it.
@@ -851,10 +1074,12 @@ mod tests {
     fn reference_finish(mut t: Tree) -> Tree {
         let n = t.len();
         t.n_files = vec![0; n];
+        t.unique = t.alloc.clone();
         let mut lists = vec![Vec::new(); n];
         for i in (1..n).rev() {
             let p = t.parents[i] as usize;
             t.alloc[p] += t.alloc[i];
+            t.unique[p] += t.unique[i];
             t.logical[p] += t.logical[i];
             t.n_files[p] += if t.flags[i] & 1 != 0 { t.n_files[i] } else { 1 };
             t.complete[p] &= t.complete[i];
@@ -864,7 +1089,7 @@ mod tests {
         }
         t.child_off = vec![0];
         for mut kids in lists {
-            kids.sort_unstable_by_key(|&c| std::cmp::Reverse(t.alloc[c as usize]));
+            kids.sort_unstable_by_key(|&c| std::cmp::Reverse(t.unique[c as usize]));
             t.children.extend(kids);
             t.child_off.push(t.children.len() as u32);
         }
@@ -875,7 +1100,7 @@ mod tests {
     fn finish_preserves_every_abi_column_and_child_order() {
         for (dirs, files) in [(0, 0), (3, 0), (1, 1024), (128, 4)] {
             let mut t = fixture(dirs, files);
-            finish(&mut t);
+            finish(&mut t, Vec::new());
             assert_eq!(t, reference_finish(fixture(dirs, files)));
         }
     }
@@ -891,7 +1116,7 @@ mod tests {
                 if variant == 0 {
                     t = reference_finish(t);
                 } else {
-                    finish(&mut t);
+                    finish(&mut t, Vec::new());
                 }
                 let elapsed = start.elapsed();
                 std::hint::black_box(&t);
@@ -909,7 +1134,12 @@ mod tests {
             tree.push("a", 2, 8192, 4096, false);
             tree.push("z", 1, 8192, 4096, false);
             tree.push("y", 1, 8192, 4096, false);
-            let mut arena = Arena { tree, hardlinks: HashMap::new() };
+            let mut arena = Arena {
+                tree,
+                hardlinks: HashMap::new(),
+                clones: Vec::new(),
+                clone_keys: HashSet::new(),
+            };
             let added: u64 = order
                 .into_iter()
                 .map(|i| arena.account_file(i, Some((7, 42))))
@@ -920,7 +1150,7 @@ mod tests {
             assert_eq!(t.alloc[4], 0); // /root/a/z
             assert_eq!(t.alloc[5], 4096); // /root/a/y wins every time
             assert_eq!(t.logical[5], 8192);
-            finish(t);
+            finish(t, Vec::new());
             assert_eq!((t.alloc[0], t.logical[0], t.n_files[0]), (4096, 8192, 3));
         }
     }
@@ -933,7 +1163,7 @@ mod tests {
         let skipped = t.push("unreadable-or-skipped", 1, 0, 0, true);
         t.push("file", 2, 8192, 4096, false);
         t.complete[skipped as usize] = false;
-        finish(&mut t);
+        finish(&mut t, Vec::new());
         assert_eq!(t.complete[..3], [false, false, true]);
         assert_eq!(t.alloc[0], 4096, "partial scans still expose observed bytes");
     }
@@ -979,6 +1209,156 @@ mod tests {
 
         assert_eq!(tree.n_files[0], 2, "both names are listed");
         assert_eq!(tree.logical[0], 1 << 20, "but the bytes count once");
+    }
+
+    fn clonefile(src: &Path, dst: &Path) -> bool {
+        let src = CString::new(src.as_os_str().as_encoded_bytes()).unwrap();
+        let dst = CString::new(dst.as_os_str().as_encoded_bytes()).unwrap();
+        unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), 0) == 0 }
+    }
+
+    #[test]
+    fn apfs_clones_count_once() {
+        const COPY: u64 = 4 << 20;
+        let root = std::env::temp_dir().join(format!("bz-test-clones-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["family/clones", "plain", "changed"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let original = root.join("family/original");
+        std::fs::write(&original, vec![7u8; COPY as usize]).unwrap();
+        std::fs::write(root.join("plain/file"), vec![9u8; 100_000]).unwrap();
+        if !clonefile(&original, &root.join("family/clones/a"))
+            || !clonefile(&original, &root.join("family/clones/b"))
+            || !clonefile(&original, &root.join("changed/c"))
+        {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("skipped: temp dir is not on APFS ({})", std::io::Error::last_os_error());
+            return;
+        }
+        // Rewriting part of a clone gives it a clone id of its own, and APFS
+        // stops counting it as a clone, but it still shares the other blocks.
+        {
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::OpenOptions::new().write(true).open(root.join("changed/c")).unwrap();
+            f.write_all_at(&[1u8; 65536], 0).unwrap();
+            f.sync_all().unwrap();
+        }
+
+        let t = scan(&root, &Progress::default());
+        let alone = scan(&root.join("family"), &Progress::default());
+        let clones_alone = scan(&root.join("family/clones"), &Progress::default());
+        let find = |n: &str| (0..t.len()).find(|&i| t.name(i) == n).unwrap();
+        let (family, clones, plain, changed) = (find("family"), find("clones"), find("plain"), find("changed"));
+        let reclaim = t.reclaimable(&[0]);
+        let reclaim_parts = t.reclaimable(&[family as u32, changed as u32, plain as u32]);
+        let reclaim_alone = alone.reclaimable(&[0]);
+        let reclaim_clones_alone = clones_alone.reclaimable(&[0]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(t.errors, 0);
+        let near = |a: u64, b: u64| a.abs_diff(b) <= 64 << 10;
+
+        let plain_file = find("file");
+        assert_eq!(t.unique[plain_file], t.alloc[plain_file], "a file that isn't cloned");
+        assert!(t.alloc[plain_file] >= 100_000);
+        assert_eq!(t.cloned(plain), 0);
+
+        // The original and the two untouched clones count as one copy.
+        assert!(near(t.alloc[family], 3 * COPY), "allocated size counts every clone: {}", t.alloc[family]);
+        assert!(near(t.unique[family], COPY), "the folder holds one copy: {}", t.unique[family]);
+        assert!(near(t.cloned(family), 2 * COPY), "two copies are cloned bytes: {}", t.cloned(family));
+        // The original has the lowest file id, so it holds the shared bytes.
+        assert!(near(t.unique[find("original")], COPY));
+        assert_eq!(t.unique[clones], 0);
+        assert_eq!((t.clone_groups.len(), t.clone_members.len()), (1, 3));
+        // The changed clone shares blocks with a file it can't name: counted in full.
+        assert_eq!(t.unique[changed], t.alloc[changed]);
+        assert_eq!(t.partial_clones, [find("c") as u32]);
+
+        // Only private blocks count as freed. Deleting the family frees
+        // nothing: the changed clone outside it still holds the shared blocks.
+        // Deleting the changed clone frees what was rewritten. Shared blocks
+        // never count, even with everything deleted.
+        assert_eq!(reclaim_parts[0], 0);
+        assert!(near(reclaim_parts[1], 65536), "{}", reclaim_parts[1]);
+        assert_eq!(reclaim_parts[2], t.unique[plain]);
+        assert!(near(reclaim[0], t.unique[plain] + 65536), "{reclaim:?}");
+
+        // Scanning only the family: it counts once and still frees nothing,
+        // though every clone the scan sees is inside it.
+        assert!(near(alone.unique[0], COPY), "{}", alone.unique[0]);
+        assert!(near(alone.cloned(0), 2 * COPY));
+        assert_eq!(reclaim_alone, [0]);
+        // Scanning only the clones, without the original.
+        assert!(near(clones_alone.unique[0], COPY), "{}", clones_alone.unique[0]);
+        assert!(near(clones_alone.cloned(0), COPY));
+        assert_eq!(reclaim_clones_alone, [0]);
+    }
+
+    #[test]
+    fn a_hard_linked_clone_counts_once() {
+        const COPY: u64 = 4 << 20;
+        let root = std::env::temp_dir().join(format!("bz-test-linked-clone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["a", "b"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let original = root.join("a/original");
+        std::fs::write(&original, vec![7u8; COPY as usize]).unwrap();
+        if !clonefile(&original, &root.join("a/clone")) {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("skipped: temp dir is not on APFS ({})", std::io::Error::last_os_error());
+            return;
+        }
+        // A second name for the clone: one inode, so one clone, not two.
+        std::fs::hard_link(root.join("a/clone"), root.join("b/link")).unwrap();
+
+        let t = scan(&root, &Progress::default());
+        let reclaim = t.reclaimable(&[0]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(t.errors, 0);
+        let near = |a: u64, b: u64| a.abs_diff(b) <= 64 << 10;
+        let find = |n: &str| (0..t.len()).find(|&i| t.name(i) == n).unwrap();
+
+        assert_eq!(t.n_files[0], 3, "every name is listed");
+        assert!(near(t.alloc[0], 2 * COPY), "the link's bytes count once: {}", t.alloc[0]);
+        assert_eq!(t.alloc[find("link")], 0, "a/clone sorts first and carries the bytes");
+        assert!(near(t.unique[0], COPY), "the original and its clone are one copy: {}", t.unique[0]);
+        assert_eq!(t.clone_members.len(), 2, "the zeroed link is not a clone member");
+        assert_eq!(t.clone_groups.len(), 1);
+        assert!(near(t.clone_groups[0].shared, COPY));
+        assert_eq!(reclaim, [0], "shared blocks never count as freed");
+    }
+
+    #[test]
+    fn clone_owner_does_not_depend_on_discovery_order() {
+        let clone = [None, None, Some((77, 30)), Some((77, 10)), Some((77, 20)), Some((78, 40))];
+        for order in [[2, 3, 4, 5], [5, 4, 2, 3], [3, 5, 4, 2]] {
+            let mut t = Tree::with_root("/no-such-root");
+            t.push("a", 0, 0, 0, true);
+            t.push("1", 1, 8000, 8192, false);
+            t.push("2", 1, 8000, 8192, false);
+            t.push("3", 1, 8000, 8192, false);
+            t.push("changed", 1, 8000, 8192, false);
+            let clones = order
+                .iter()
+                .map(|&i| {
+                    let (id, file_id) = clone[i].unwrap();
+                    let shares_all = id == 77;
+                    (CloneInfo { key: (1, id), file_id, shares_all }, i as u32)
+                })
+                .collect();
+            finish(&mut t, clones);
+            assert_eq!(t.unique[2..], [0, 8192, 0, 8192], "file id 10 holds the shared bytes");
+            assert_eq!((t.alloc[0], t.unique[0], t.cloned(0)), (4 * 8192, 2 * 8192, 2 * 8192));
+            assert_eq!(t.clone_members, [3, 4, 2]);
+            assert_eq!(t.clone_groups, [CloneGroup { end: 3, shared: 8192 }]);
+            assert_eq!(t.partial_clones, [5]);
+            // Full clones free nothing, and with no files on disk the changed
+            // file's private size is unknown, so nothing counts as freed.
+            assert_eq!(t.reclaimable(&[1]), [0]);
+            assert_eq!(t.reclaimable(&[3, 4]), [0, 0]);
+        }
     }
 
     #[test]

@@ -7,7 +7,10 @@ import ImageIO
 // Minimal immutable adapter for the production Tree read interface. Every
 // rendering algorithm, shader and event hit test is compiled from app sources.
 nonisolated final class Tree: @unchecked Sendable {
-    let alloc: [UInt64]
+    let size: [UInt64]
+    /// Baseline sources from before unique sizes still read `alloc`.
+    var alloc: [UInt64] { size }
+    func cloneNote(_ i: Int) -> String? { nil }
     let parents: [UInt32]
     let nFiles: [UInt32]
     let nameOff: [UInt32]
@@ -69,7 +72,7 @@ nonisolated final class Tree: @unchecked Sendable {
         }
         var offsets: [UInt32] = [0], blob: [UInt8] = []
         for name in names { blob += name.utf8; offsets.append(UInt32(blob.count)) }
-        self.names = names; self.parents = parents; self.alloc = sizes; self.dirs = dirs
+        self.names = names; self.parents = parents; self.size = sizes; self.dirs = dirs
         self.nFiles = files; self.childLists = kids; self.nameOff = offsets; self.nameBlob = blob
     }
     func children(_ node: Int) -> [UInt32] { childLists[node] }
@@ -159,7 +162,7 @@ enum Fmt {
         // BASELINE-PAINTER-BEGIN
         let oldOut = LegacyTreemapNSView.RenderOutput()
         let oldOps = LegacyTreemapNSView.layoutOps(tree: tree, pw: pw, ph: ph, scale: scale, root: root,
-                                                  showFree: free, freeBytes: tree.alloc[0] / 3, out: oldOut)
+                                                  showFree: free, freeBytes: tree.size[0] / 3, out: oldOut)
         var a = [UInt32](repeating: 0xFF16_1616, count: pw * ph)
         a.withUnsafeMutableBufferPointer { pixels in
             oldOps.withUnsafeBufferPointer { LegacyTreemapNSView.paint($0, base: pixels.baseAddress!, pw: pw, ph: ph, rows: 0..<ph) }
@@ -172,7 +175,7 @@ enum Fmt {
     static func cushions(_ tree: Tree, pw: Int, ph: Int, scale: CGFloat, root: Int,
                          free: Bool, bands: Int) -> (pixels: [UInt32], leaves: Int, labels: Int) {
         var layout = TreemapRenderer.Layout(tree: tree, pw: pw, ph: ph, scale: scale,
-                                            showFree: free, freeBytes: tree.alloc[0] / 3)
+                                            showFree: free, freeBytes: tree.size[0] / 3)
         layout.draw(root, CGRect(x: 0, y: 0, width: pw, height: ph),
                     TreemapRenderer.Cushion.baseHeight, TreemapRenderer.Surface(), 0)
         var b = [UInt32](repeating: 0, count: pw * ph) // the painter writes every pixel
@@ -256,7 +259,7 @@ enum Fmt {
                 for (width, height) in [(480.0, 320.0), (1024.25, 700.75), (1440.0, 900.0)] {
                     for free in [false, true] {
                         let model = ScanModel(); model.tree = Tree(kind: kind)
-                        model.showFreeSpace = free; model.freeBytes = max(1, model.tree!.alloc[0] / 3)
+                        model.showFreeSpace = free; model.freeBytes = max(1, model.tree!.size[0] / 3)
                         let frame = CGRect(x: 0, y: 0, width: width, height: height)
                         let sb = SunburstNSView(frame: frame), old = LegacySunburstNSView(frame: frame)
                         old.model = model; sb.model = model
@@ -293,7 +296,7 @@ enum Fmt {
             var sink = 0
             for _ in 0..<15 {
                 let r = TreemapRenderer.render(tree: tree, pw: 2880, ph: 1800, scale: 2, root: 0,
-                                               showFree: true, freeBytes: tree.alloc[0] / 3)
+                                               showFree: true, freeBytes: tree.size[0] / 3)
                 let index = ms { sink += TMLeafIndex(leaves: r.leaves, size: CGSize(width: 1440, height: 900)).cells.count }
                 print("phase,treemap,layout,\(r.layoutMs),index,\(index),paint,\(r.paintMs)")
                 sink += r.image.width
@@ -311,7 +314,7 @@ enum Fmt {
             for (width, height) in [(480.0, 320.0), (1024.25, 700.75)] {
                 for free in [false, true] {
                     let model = ScanModel()
-                    model.tree = tree; model.showFreeSpace = free; model.freeBytes = max(1, tree.alloc[0] / 3)
+                    model.tree = tree; model.showFreeSpace = free; model.freeBytes = max(1, tree.size[0] / 3)
                     let frame = CGRect(x: 0, y: 0, width: width, height: height)
                     let tm = TreemapNSView(frame: frame), oldTM = LegacyTreemapNSView(frame: frame)
                     tm.model = model; oldTM.model = model
@@ -386,7 +389,7 @@ enum Fmt {
         print("workload,baseline_median_ms,optimized_median_ms,speedup")
         for kind in ["balanced", "flat", "deep"] {
             let tree = Tree(kind: kind)
-            let model = ScanModel(); model.tree = tree; model.showFreeSpace = true; model.freeBytes = tree.alloc[0] / 3
+            let model = ScanModel(); model.tree = tree; model.showFreeSpace = true; model.freeBytes = tree.size[0] / 3
             let frame = CGRect(x: 0, y: 0, width: 1440, height: 900)
             let tm = TreemapNSView(frame: frame), oldTM = LegacyTreemapNSView(frame: frame)
             let sb = SunburstNSView(frame: frame), oldSB = LegacySunburstNSView(frame: frame)

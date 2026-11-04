@@ -279,12 +279,22 @@ private struct ScanStatusBar: View {
                         .lineLimit(1)
                         .truncationMode(.middle)
                     Spacer()
-                    let a = tree.alloc[sel]
-                    let rootA = max(tree.alloc[model.viewRoot], 1)
+                    let a = tree.size[sel]
+                    let rootA = max(tree.size[model.viewRoot], 1)
+                    if let note = tree.cloneNote(sel) {
+                        Text(note).foregroundStyle(.tertiary)
+                    }
                     Text("\(Fmt.size(a)) · \(String(format: "%.1f%%", 100 * Double(a) / Double(rootA)))")
                         .monospacedDigit()
                 } else {
-                    Text("\(Fmt.num(UInt64(tree.nFiles[model.viewRoot]))) files · \(Fmt.size(tree.alloc[model.viewRoot]))")
+                    Text("\(Fmt.num(UInt64(tree.nFiles[model.viewRoot]))) files · \(Fmt.size(tree.size[model.viewRoot]))")
+                    let cloned = tree.cloned(model.viewRoot)
+                    if cloned >= 1_000_000 {
+                        Text("\(Fmt.size(cloned)) shared by APFS clones (counted once)")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .lineLimit(1)
+                    }
                     Spacer()
                     if tree.errors > 0 {
                         if FDA.isActive() {
@@ -378,12 +388,52 @@ final class NameCell: NSTableCellView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private static let noteFont = NSFont.systemFont(ofSize: 11)
+    private static let noteLineHeight = ceil(noteFont.ascender - noteFont.descender + noteFont.leading)
+    /// Muted text after the name, e.g. "+918 GB cloned". Made on first use:
+    /// most rows never have one.
+    private var noteField: NSTextField?
+
+    var note: String? {
+        didSet {
+            guard note != oldValue else { return }
+            if let note, noteField == nil {
+                let tf = NSTextField(labelWithString: note)
+                tf.font = Self.noteFont
+                tf.textColor = .tertiaryLabelColor
+                tf.alignment = .right
+                tf.lineBreakMode = .byTruncatingTail
+                addSubview(tf)
+                noteField = tf
+            }
+            noteField?.stringValue = note ?? ""
+            noteField?.isHidden = note == nil
+            needsLayout = true
+        }
+    }
+
     override func layout() {
         super.layout()
         let h = bounds.height
         imageView?.frame = NSRect(x: 2, y: ((h - 16) / 2).rounded(), width: 16, height: 16)
+        var noteWidth: CGFloat = 0
+        if let noteField, note != nil {
+            // The name comes first; the note gets what's left, or none if
+            // too little is (the tooltip and status bar repeat it).
+            let nameWidth = ceil(textField?.attributedStringValue.size().width ?? 0) + 4
+            let left = bounds.width - 25 - nameWidth - 6
+            // Too narrow for the figure: just "cloned" (or nothing).
+            let width = { (s: String) in ceil((s as NSString).size(withAttributes: [.font: Self.noteFont]).width) + 4 }
+            let fits = [note, "cloned"].compactMap { $0 }.first { width($0) <= left }
+            noteField.stringValue = fits ?? ""
+            noteWidth = fits.map(width) ?? 0
+            noteField.isHidden = fits == nil
+            noteField.frame = NSRect(x: bounds.width - 2 - noteWidth, y: ((h - Self.noteLineHeight) / 2).rounded(),
+                                     width: noteWidth, height: Self.noteLineHeight)
+            if noteWidth > 0 { noteWidth += 6 }
+        }
         textField?.frame = NSRect(x: 23, y: ((h - Self.lineHeight) / 2).rounded(),
-                                  width: max(0, bounds.width - 25), height: Self.lineHeight)
+                                  width: max(0, bounds.width - 25 - noteWidth), height: Self.lineHeight)
     }
 }
 
@@ -579,12 +629,13 @@ struct OutlinePanel: NSViewRepresentable {
                 let name = tree.name(it.id)
                 cell.textField?.stringValue = name
                 cell.imageView?.image = icon(for: name, isDir: tree.isDir(it.id))
+                (cell as? NameCell)?.note = tree.cloneNote(it.id)
             } else if column == "size" {
-                cell.textField?.stringValue = Fmt.size(tree.alloc[it.id])
+                cell.textField?.stringValue = Fmt.size(tree.size[it.id])
             } else {
                 let parent = Int(tree.parents[it.id])
-                let pAlloc = parent == Int(UInt32.max) ? tree.alloc[0] : tree.alloc[parent]
-                let pct = pAlloc > 0 ? 100 * Double(tree.alloc[it.id]) / Double(pAlloc) : 0
+                let pAlloc = parent == Int(UInt32.max) ? tree.size[0] : tree.size[parent]
+                let pct = pAlloc > 0 ? 100 * Double(tree.size[it.id]) / Double(pAlloc) : 0
                 cell.textField?.stringValue = pct < 0.5 ? "–" : String(format: "%.0f%%", pct)
                 cell.textField?.textColor = .tertiaryLabelColor
             }

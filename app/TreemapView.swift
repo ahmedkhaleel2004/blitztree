@@ -133,7 +133,7 @@ final class TreemapNSView: NSView {
         }
 
         static func size(_ label: TMLabel, tree: Tree, hovered: Bool) -> NSAttributedString {
-            NSAttributedString(string: Fmt.size(tree.alloc[label.node]), attributes: [
+            NSAttributedString(string: Fmt.size(tree.size[label.node]), attributes: [
                 .font: NSFont.monospacedDigitSystemFont(ofSize: 10, weight: .medium),
                 .foregroundColor: NSColor.white.withAlphaComponent(hovered ? 0.95 : 0.60),
             ])
@@ -413,7 +413,8 @@ final class TreemapNSView: NSView {
             hoveredNode = node
             model?.hovered = node
             if let node, let tree = model?.tree {
-                toolTip = "\(tree.displayPath(node))\n\(Fmt.size(tree.alloc[node]))"
+                let note = tree.cloneNote(node).map { " (\($0))" } ?? ""
+                toolTip = "\(tree.displayPath(node))\n\(Fmt.size(tree.size[node]))\(note)"
             } else {
                 toolTip = nil
             }

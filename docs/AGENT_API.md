@@ -35,11 +35,19 @@ Common fields: `schema_version`, `tool`, `version`, `command`, `read_only`,
 `root` (absolute resolved path), `generated_at_unix`, `scan_seconds`, `options`,
 `summary`, `coverage`, `report`.
 
-`summary` contains `allocated_bytes`, `logical_bytes`, `file_count`,
-`directory_count`. File counts include hard-link names; bytes are counted once
-per inode within the scan, attributed to the lexicographically first scanned
-path independently of worker order. APFS clones/snapshots and links outside the scan mean
-allocated bytes are **not a prediction of bytes recovered by deletion**.
+`summary` contains `allocated_bytes`, `logical_bytes`, `unique_bytes`,
+`cloned_bytes`, `file_count`, `directory_count`. File counts include hard-link
+names; bytes are counted once per inode within the scan, attributed to the
+lexicographically first scanned path independently of worker order. APFS
+clones/snapshots and links outside the scan mean allocated bytes are **not a
+prediction of bytes recovered by deletion**.
+
+`allocated_bytes` counts every APFS clone in full. `unique_bytes` counts the
+blocks a family of full clones shares once, toward the member with the lowest
+file id inside the scan; the other members count zero. `cloned_bytes` is
+`allocated_bytes - unique_bytes`. A clone that was partly rewritten no longer
+names the file it shares blocks with, so it counts in full in both. On volumes
+other than APFS, `unique_bytes` equals `allocated_bytes`.
 
 `coverage` reports total `errors` (including `entry_errors` and `invalid_names`),
 `skipped_cloud_directories` and `skipped_mount_points`. `complete=false` if any
@@ -59,15 +67,16 @@ potentially incorrect paths.
   excluding the root itself; parents and their children may both appear.
 - `largest_files`: largest files or links throughout the scan.
 
-Each entry includes its absolute path, kind, allocated/logical bytes, file count
-and `complete` flag. Partially scanned directories remain visible and are marked
+Each entry includes its absolute path, kind, allocated/logical/unique/cloned
+bytes, file count and `complete` flag. These lists are ordered and filtered by
+allocated bytes. Partially scanned directories remain visible and are marked
 `complete=false`. These lists overlap; do not sum their sizes. Large folders and
 files are inventory, without any judgment about whether they can be removed.
 
 `quick-wins` returns:
 
-- `candidates`: path, kind, allocated/logical bytes, file count, category,
-  reason, `complete` and `requires_review=true`.
+- `candidates`: path, kind, allocated/logical/unique/cloned bytes, file count,
+  category, reason, `complete` and `requires_review=true`.
 - `candidate_count`, `truncated`, `candidate_allocated_bytes` (all candidates)
   and `displayed_allocated_bytes` (only returned candidates).
 - `reclaimable_bytes=null`: the API does not predict recoverable space.
@@ -93,8 +102,9 @@ or activity filters are introduced by the CLI.
 
 Both interfaces visit descendants, excluding the scan root itself and `.Trash`
 subtrees. A recognized directory is never descended into, even below the size
-threshold, so candidates never nest. Sort order is allocated bytes descending,
-then path ascending to make size ties deterministic. Default threshold:
+threshold, so candidates never nest. The threshold applies to unique bytes, and
+sort order is unique bytes descending, then path ascending to make size ties
+deterministic. Default threshold:
 **50,000,000 bytes**, the panel's existing threshold. `--min-bytes` overrides it
 for the CLI and accepts bytes as an unsigned integer. Default output limit:
 **20**, maximum **1000**; limiting affects presentation, not selection or totals.

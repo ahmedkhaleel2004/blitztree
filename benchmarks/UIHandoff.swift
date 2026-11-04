@@ -30,7 +30,7 @@ struct UIHandoff {
                 if definition.identifier.rawValue == "name" {
                     precondition(cell.textField?.stringValue == item.tree.name(item.id), "Stale displayed name")
                 } else if definition.identifier.rawValue == "size" {
-                    precondition(cell.textField?.stringValue == Fmt.size(item.tree.alloc[item.id]), "Stale displayed size")
+                    precondition(cell.textField?.stringValue == Fmt.size(item.tree.size[item.id]), "Stale displayed size")
                 }
                 checked += 1
             }
@@ -121,7 +121,23 @@ struct UIHandoff {
             if let path = ProcessInfo.processInfo.environment["BZ_UI_IMAGE"], let view = window.contentView,
                let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) {
                 view.cacheDisplay(in: view.bounds, to: bitmap)
-                try! bitmap.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
+                // The window, not the content view, draws the background the
+                // status bar sits on; without it, light text lands on clear.
+                let image = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: bitmap.pixelsWide,
+                                             pixelsHigh: bitmap.pixelsHigh, bitsPerSample: 8, samplesPerPixel: 4,
+                                             hasAlpha: true, isPlanar: false, colorSpaceName: .deviceRGB,
+                                             bytesPerRow: 0, bitsPerPixel: 0)!
+                NSGraphicsContext.saveGraphicsState()
+                NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: image)
+                let rect = NSRect(x: 0, y: 0, width: bitmap.pixelsWide, height: bitmap.pixelsHigh)
+                NSAppearance(named: .darkAqua)!.performAsCurrentDrawingAppearance {
+                    NSColor.windowBackgroundColor.setFill()
+                    rect.fill()
+                }
+                bitmap.draw(in: rect, from: .zero, operation: .sourceOver, fraction: 1,
+                            respectFlipped: false, hints: nil)
+                NSGraphicsContext.restoreGraphicsState()
+                try! image.representation(using: .png, properties: [:])!.write(to: URL(fileURLWithPath: path))
             }
             app.terminate(nil)
         }

@@ -170,7 +170,7 @@ private struct AgentCandidateHeap {
     let limit: Int
     var nodes: [Int] = []
     func worse(_ a: Int, _ b: Int) -> Bool {
-        tree.alloc[a] == tree.alloc[b] ? a > b : tree.alloc[a] < tree.alloc[b]
+        tree.size[a] == tree.size[b] ? a > b : tree.size[a] < tree.size[b]
     }
     mutating func offer(_ node: Int) {
         if nodes.count < limit {
@@ -202,12 +202,12 @@ private func largestWithHeap(_ tree: Tree) -> ([Int], [Int]) {
     var stack = [0]
     while let parent = stack.popLast() {
         for raw in tree.children(parent) {
-            let i = Int(raw), size = tree.alloc[i]
+            let i = Int(raw), size = tree.size[i]
             guard size >= 100_000_000 else { break }
             if tree.isDir(i) {
                 stack.append(i)
                 if let first = tree.children(i).first, tree.isDir(Int(first)),
-                   Double(tree.alloc[Int(first)]) >= 0.95 * Double(size) { continue }
+                   Double(tree.size[Int(first)]) >= 0.95 * Double(size) { continue }
                 folders.offer(i)
             } else if size >= 250_000_000 { files.offer(i) }
         }

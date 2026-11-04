@@ -103,7 +103,7 @@ pub fn find(t: &Tree, min_bytes: u64) -> Vec<Candidate> {
         for &child in t.kids(i) {
             let c = child as usize;
             // Skip this subtree, not later siblings (the final sort decides order).
-            if t.alloc[c] < min_bytes || !t.is_dir(c) || t.name(c) == ".Trash" {
+            if t.unique[c] < min_bytes || !t.is_dir(c) || t.name(c) == ".Trash" {
                 continue;
             }
             if let Some(kind) = kind(t, child) {
@@ -114,8 +114,8 @@ pub fn find(t: &Tree, min_bytes: u64) -> Vec<Candidate> {
         }
     }
     found.sort_by(|a, b| {
-        t.alloc[b.node as usize]
-            .cmp(&t.alloc[a.node as usize])
+        t.unique[b.node as usize]
+            .cmp(&t.unique[a.node as usize])
             .then_with(|| t.path(a.node as usize).cmp(&t.path(b.node as usize)))
     });
     found
@@ -131,6 +131,7 @@ mod tests {
         if parent == NO_PARENT {
             *scan = Tree::with_root(name);
             scan.alloc[0] = bytes;
+            scan.unique[0] = bytes;
             scan.logical[0] = bytes;
             return 0;
         }

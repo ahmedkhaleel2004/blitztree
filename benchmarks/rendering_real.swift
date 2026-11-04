@@ -85,8 +85,8 @@ let renderingScale: CGFloat = 2
     static func compare(_ tree: Tree, iterations: Int) -> Bool {
         // Largest child directory: the zoomed-in case.
         let zoom = tree.children(0).map(Int.init).filter { tree.isDir($0) }
-            .max { tree.alloc[$0] < tree.alloc[$1] } ?? 0
-        let freeBytes = tree.alloc[0] / 3
+            .max { tree.size[$0] < tree.size[$1] } ?? 0
+        let freeBytes = tree.size[0] / 3
         let cases: [(String, CGSize, Int, Bool)] = [
             ("3200x2000", CGSize(width: 1600, height: 1000), 0, false),
             ("1600x1600", CGSize(width: 800, height: 800), 0, false),

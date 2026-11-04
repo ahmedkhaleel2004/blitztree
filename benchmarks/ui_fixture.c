@@ -41,6 +41,7 @@ void bz_progress(BzScan *h, uint64_t *f, uint64_t *d, uint64_t *b, int *done) {
 uint64_t bz_take_tree(BzScan *h) { return h->count; }
 const uint32_t *bz_parents(BzScan *h) { return h->parents; }
 const uint64_t *bz_alloc(BzScan *h) { return h->alloc; }
+const uint64_t *bz_unique(BzScan *h) { return h->alloc; } // no clones in fixtures
 const uint64_t *bz_logical(BzScan *h) { return h->alloc; }
 const uint32_t *bz_nfiles(BzScan *h) { return h->nfiles; }
 const uint8_t *bz_flags(BzScan *h) { return h->flags; }
@@ -61,6 +62,9 @@ void bz_fixture_add_cleanup(BzScan *h, uint32_t node, const char *description) {
 }
 uint64_t bz_cleanup_count(BzScan *h) { return h->cleanup_count; }
 const uint32_t *bz_cleanup_nodes(BzScan *h) { return h->cleanup_nodes; }
+void bz_reclaimable(BzScan *h, const uint32_t *nodes, uint64_t count, uint64_t *out) {
+    for (uint64_t i = 0; i < count; ++i) out[i] = h->alloc[nodes[i]];
+}
 const char *bz_cleanup_description(BzScan *h, uint64_t index) {
     return index < h->cleanup_count ? h->cleanup_descriptions[index] : NULL;
 }

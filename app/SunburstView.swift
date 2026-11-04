@@ -166,13 +166,13 @@ final class SunburstNSView: NSView {
 
         func place(_ dir: Int, ring: Int, start: Double, span: Double) {
             guard ring < rings, span >= minAngle[ring] else { return }
-            let total = Double(max(tree.alloc[dir], 1))
+            let total = Double(max(tree.size[dir], 1))
             let kids = tree.children(dir)
             var a = start
             var shown = 0
             for k in kids {
                 let node = Int(k)
-                let bytes = tree.alloc[node]
+                let bytes = tree.size[node]
                 let s = span * Double(bytes) / total
                 // Sorted largest first: once one is too thin, all the rest are.
                 if s < minAngle[ring] { break }
@@ -186,13 +186,13 @@ final class SunburstNSView: NSView {
             let rest = start + span - a
             if shown < kids.count, rest >= minAngle[ring] {
                 var bytes: UInt64 = 0
-                for k in kids[shown...] { bytes += tree.alloc[Int(k)] }
+                for k in kids[shown...] { bytes += tree.size[Int(k)] }
                 out.append(SBSegment(node: -2, ring: ring, start: a, end: start + span, bytes: bytes,
                                      count: kids.count - shown, color: (0.30, 0.30, 0.32)))
             }
         }
 
-        let used = Double(tree.alloc[root])
+        let used = Double(tree.size[root])
         let full = 2 * Double.pi
         if freeBytes > 0 {
             let usedSpan = full * used / (used + Double(freeBytes))
@@ -442,7 +442,7 @@ final class SunburstNSView: NSView {
         let title: String
         let size: UInt64
         var detail: String?
-        let rootBytes = max(tree.alloc[model.viewRoot], 1)
+        let rootBytes = max(tree.size[model.viewRoot], 1)
         if let i = hoveredSegment, i < segments.count {
             let s = segments[i]
             size = s.bytes
@@ -456,10 +456,10 @@ final class SunburstNSView: NSView {
         } else if hoveringCenter && model.viewRoot != 0 {
             let p = Int(tree.parents[model.viewRoot])
             title = "Back to \(p == 0 || p == Int(UInt32.max) ? rootName(model) : tree.name(p))"
-            size = tree.alloc[p == Int(UInt32.max) ? 0 : p]
+            size = tree.size[p == Int(UInt32.max) ? 0 : p]
         } else {
             title = model.viewRoot == 0 ? rootName(model) : tree.name(model.viewRoot)
-            size = tree.alloc[model.viewRoot]
+            size = tree.size[model.viewRoot]
             detail = "\(Fmt.num(UInt64(tree.nFiles[model.viewRoot]))) files"
         }
 
@@ -584,7 +584,8 @@ final class SunburstNSView: NSView {
         let node = seg.map { segments[$0].node }.flatMap { $0 >= 0 ? $0 : nil }
         model?.hovered = node
         if let node, let tree = model?.tree {
-            toolTip = "\(tree.displayPath(node))\n\(Fmt.size(tree.alloc[node]))"
+            let note = tree.cloneNote(node).map { " (\($0))" } ?? ""
+            toolTip = "\(tree.displayPath(node))\n\(Fmt.size(tree.size[node]))\(note)"
         } else {
             toolTip = nil
         }

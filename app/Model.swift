@@ -9,7 +9,11 @@ nonisolated final class Tree: @unchecked Sendable {
     private let handle: OpaquePointer
     let count: Int
     let parents: UnsafePointer<UInt32>
-    let alloc: UnsafePointer<UInt64>
+    /// What the list, maps and percentages show: allocated bytes with APFS
+    /// clones counted once (the engine's unique size).
+    let size: UnsafePointer<UInt64>
+    /// Allocated bytes counting every clone in full.
+    let allocated: UnsafePointer<UInt64>
     let logical: UnsafePointer<UInt64>
     let nFiles: UnsafePointer<UInt32>
     let flags: UnsafePointer<UInt8>
@@ -25,7 +29,8 @@ nonisolated final class Tree: @unchecked Sendable {
         let n = bz_take_tree(handle)
         guard n > 0,
               let parents = bz_parents(handle),
-              let alloc = bz_alloc(handle),
+              let size = bz_unique(handle),
+              let allocated = bz_alloc(handle),
               let logical = bz_logical(handle),
               let nFiles = bz_nfiles(handle),
               let flags = bz_flags(handle),
@@ -38,7 +43,8 @@ nonisolated final class Tree: @unchecked Sendable {
         self.handle = handle
         self.count = Int(n)
         self.parents = parents
-        self.alloc = alloc
+        self.size = size
+        self.allocated = allocated
         self.logical = logical
         self.nFiles = nFiles
         self.flags = flags
@@ -54,6 +60,31 @@ nonisolated final class Tree: @unchecked Sendable {
     deinit { bz_free(handle) }
 
     func isDir(_ i: Int) -> Bool { flags[i] & 1 != 0 }
+
+    /// Bytes shared with APFS clones and counted elsewhere.
+    func cloned(_ i: Int) -> UInt64 { allocated[i] - size[i] }
+
+    /// "+918 GB cloned", or "2.26 GB cloned" for a clone counted elsewhere
+    /// in full (its size is zero). Nil when the cloned bytes are under a
+    /// tenth of the node's allocated size or under 1 MB.
+    func cloneNote(_ i: Int) -> String? {
+        let c = cloned(i)
+        guard c >= 1_000_000, c >= allocated[i] / 10 else { return nil }
+        return size[i] == 0 ? "\(Fmt.size(c)) cloned" : "+\(Fmt.size(c)) cloned"
+    }
+
+    /// What deleting each node frees; blocks shared with APFS clones don't
+    /// count. The nodes must not contain one another.
+    func reclaimable(_ nodes: [UInt32]) -> [UInt64] {
+        guard !nodes.isEmpty else { return [] }
+        var out = [UInt64](repeating: 0, count: nodes.count)
+        nodes.withUnsafeBufferPointer { ids in
+            out.withUnsafeMutableBufferPointer {
+                bz_reclaimable(handle, ids.baseAddress, UInt64(ids.count), $0.baseAddress)
+            }
+        }
+        return out
+    }
 
     func cleanupDescription(_ index: Int) -> String {
         guard let label = bz_cleanup_description(handle, UInt64(index)) else { return "" }
@@ -117,7 +148,7 @@ nonisolated final class Tree: @unchecked Sendable {
         var cur = node
         while !isDrawn(cur) {
             let parent = parents[cur]
-            guard parent != UInt32.max, alloc[Int(parent)] <= 2 * alloc[node] else { return nil }
+            guard parent != UInt32.max, size[Int(parent)] <= 2 * size[node] else { return nil }
             cur = Int(parent)
         }
         return cur
@@ -358,7 +389,7 @@ final class ScanModel {
         // index, unified logs, …) no unelevated app can read.
         unscannedBytes = 0
         if let tree, let used = space.used {
-            let seen = tree.alloc[0]
+            let seen = tree.size[0]
             if used > seen {
                 unscannedBytes = used - seen
             }
