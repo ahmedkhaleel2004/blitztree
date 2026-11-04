@@ -176,6 +176,12 @@ impl Tree {
     /// off the main thread; an unknown private size counts as not freed. Hard
     /// links and snapshots are not considered.
     pub fn reclaimable(&self, roots: &[u32]) -> Vec<u64> {
+        self.reclaimable_with(roots, private_size)
+    }
+    /// `reclaimable`, with `private` giving each partly cloned file's private
+    /// size. A tree loaded from a saved scan passes `|_| None`, so showing it
+    /// doesn't read the disk while the fresh scan runs.
+    pub fn reclaimable_with(&self, roots: &[u32], private: impl Fn(&Path) -> Option<u64>) -> Vec<u64> {
         let mut out: Vec<u64> = roots.iter().map(|&r| self.unique[r as usize]).collect();
         let slot: HashMap<u32, usize> = roots.iter().enumerate().map(|(k, &r)| (r, k)).collect();
         let inside = |mut i: u32| loop {
@@ -199,7 +205,7 @@ impl Tree {
         }
         for &i in &self.partial_clones {
             let Some(k) = inside(i) else { continue };
-            let private = private_size(&self.path(i as usize)).unwrap_or(0);
+            let private = private(&self.path(i as usize)).unwrap_or(0);
             out[k] -= self.unique[i as usize].saturating_sub(private).min(out[k]);
         }
         out
@@ -1337,6 +1343,16 @@ mod tests {
             // file's private size is unknown, so nothing counts as freed.
             assert_eq!(t.reclaimable(&[1]), [0]);
             assert_eq!(t.reclaimable(&[3, 4]), [0, 0]);
+            // A known private size is what deleting the changed file frees.
+            let asked = std::cell::Cell::new(0);
+            let private = |p: &Path| {
+                asked.set(asked.get() + 1);
+                assert!(p.ends_with("a/changed"));
+                Some(3000)
+            };
+            assert_eq!(t.reclaimable_with(&[1], private), [3000]);
+            assert_eq!(asked.get(), 1);
+            assert_eq!(t.reclaimable_with(&[1], |_| None), [0]);
         }
     }
 

@@ -26,6 +26,8 @@ struct Flat {
     root: PathBuf,
     /// When the scan started, so a saved copy can say how old it is.
     scanned_at: SystemTime,
+    /// Loaded from a saved scan: never read the disk for it (see bz_reclaimable).
+    saved: bool,
 }
 
 fn with_cleanup(tree: Tree, root: PathBuf, scanned_at: SystemTime) -> Flat {
@@ -39,6 +41,7 @@ fn with_cleanup(tree: Tree, root: PathBuf, scanned_at: SystemTime) -> Flat {
         tree,
         root,
         scanned_at,
+        saved: false,
     }
 }
 
@@ -122,7 +125,7 @@ pub extern "C" fn bz_cache_load(cache_path: *const c_char, root: *const c_char) 
         }
     };
     let t1 = std::time::Instant::now();
-    let flat = with_cleanup(tree, root, scanned_at);
+    let flat = Flat { saved: true, ..with_cleanup(tree, root, scanned_at) };
     if std::env::var_os("BZ_TIMING").is_some() {
         eprintln!(
             "[bz] cache load {:.3}s  cleanup {:.1}ms",
@@ -233,7 +236,8 @@ pub unsafe extern "C" fn bz_cleanup_nodes(h: *mut BzScan) -> *const u32 {
 /// Write what deleting each of `count` nodes would free (see
 /// `Tree::reclaimable`) to `out`. The nodes must not contain one another.
 /// This asks the file system about partly cloned files, so prefer calling
-/// it off the main thread; it only reads the tree.
+/// it off the main thread; it only reads the tree. A saved scan
+/// (bz_cache_load) asks nothing and counts partly cloned files as not freed.
 ///
 /// # Safety
 /// `h` must be a live scan handle, with no concurrent mutation or free.
@@ -250,7 +254,10 @@ pub unsafe extern "C" fn bz_reclaimable(h: *mut BzScan, nodes: *const u32, count
         if nodes.iter().any(|&n| n as usize >= f.tree.len()) {
             return;
         }
-        let freed = f.tree.reclaimable(nodes);
+        // A saved scan is shown while the fresh scan walks the disk, so it
+        // must not add disk reads of its own; its partly cloned files count
+        // as not freed until the fresh scan replaces it.
+        let freed = if f.saved { f.tree.reclaimable_with(nodes, |_| None) } else { f.tree.reclaimable(nodes) };
         unsafe { std::ptr::copy_nonoverlapping(freed.as_ptr(), out, freed.len()) };
     }
 }
@@ -316,5 +323,53 @@ mod tests {
             }
             assert!(unsafe { bz_cleanup_description(h, expected.len() as u64) }.is_null());
         }
+    }
+
+    #[test]
+    fn a_saved_scan_never_asks_the_disk_for_private_sizes() {
+        // A clone with its first 64 KiB rewritten: only the fresh scan may
+        // read its private size from disk.
+        let root = std::env::temp_dir().join(format!("bz-test-saved-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("original"), vec![7u8; 1 << 20]).unwrap();
+        let (src, dst) = (CString::new(root.join("original").to_str().unwrap()).unwrap(),
+                          CString::new(root.join("changed").to_str().unwrap()).unwrap());
+        if unsafe { libc::clonefile(src.as_ptr(), dst.as_ptr(), 0) } != 0 {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("skipped: temp dir is not on APFS");
+            return;
+        }
+        {
+            use std::os::unix::fs::FileExt;
+            let f = std::fs::OpenOptions::new().write(true).open(root.join("changed")).unwrap();
+            f.write_all_at(&[1u8; 65536], 0).unwrap();
+            f.sync_all().unwrap();
+        }
+        let tree = scan(&root, &Progress::default());
+        let file = root.join("saved.bzcache");
+        cache::save(&tree, &root, UNIX_EPOCH, &file).unwrap();
+        let changed = (0..tree.len()).find(|&i| tree.name(i) == "changed").unwrap() as u32;
+        assert!(tree.partial_clones.contains(&changed));
+        let fresh = Box::into_raw(Box::new(BzScan {
+            progress: Arc::new(Progress::default()),
+            done: Arc::new(AtomicBool::new(true)),
+            result: Arc::new(std::sync::Mutex::new(None)),
+            flat: Some(Box::new(with_cleanup(tree, root.clone(), UNIX_EPOCH))),
+        }));
+        let (cfile, croot) = (CString::new(file.to_str().unwrap()).unwrap(), CString::new(root.to_str().unwrap()).unwrap());
+        let saved = bz_cache_load(cfile.as_ptr(), croot.as_ptr());
+        assert!(!saved.is_null());
+        let freed = |h| {
+            let mut out = [u64::MAX];
+            unsafe { bz_reclaimable(h, &changed, 1, out.as_mut_ptr()) };
+            out[0]
+        };
+        let (from_disk, from_saved) = (freed(fresh), freed(saved));
+        let _ = std::fs::remove_dir_all(&root);
+        bz_free(fresh);
+        bz_free(saved);
+        assert!(from_disk >= 65536, "the fresh scan reads the rewritten blocks: {from_disk}");
+        assert_eq!(from_saved, 0, "the saved scan counts them as unknown");
     }
 }

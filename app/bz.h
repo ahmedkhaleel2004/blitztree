@@ -31,7 +31,8 @@ const char *bz_cleanup_description(BzScan *h, uint64_t index);
 
 // Writes count values: what deleting each node frees. Blocks shared with APFS
 // clones don't count. Nodes must not contain one another. Reads partly cloned
-// files' attributes, so prefer calling it off the main thread.
+// files' attributes, so prefer calling it off the main thread. A handle from
+// bz_cache_load reads nothing and counts partly cloned files as not freed.
 void bz_reclaimable(BzScan *h, const uint32_t *nodes, uint64_t count, uint64_t *out);
 
 // The last finished scan of a folder, saved to disk. bz_cache_load returns a
