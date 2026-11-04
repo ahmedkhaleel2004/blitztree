@@ -20,8 +20,11 @@ nonisolated final class Tree: @unchecked Sendable {
     let cleanupCount: Int
     let cleanupNodes: UnsafePointer<UInt32>
     let errors: UInt64
+    /// Shared by a scan's tree and the trees `without` derives from it,
+    /// whose node IDs mean the same items.
+    let scanID: UUID
 
-    init?(handle: OpaquePointer) {
+    init?(handle: OpaquePointer, scanID: UUID = UUID()) {
         let n = bz_take_tree(handle)
         guard n > 0,
               let parents = bz_parents(handle),
@@ -49,11 +52,25 @@ nonisolated final class Tree: @unchecked Sendable {
         self.cleanupCount = Int(bz_cleanup_count(handle))
         self.cleanupNodes = cleanupNodes
         self.errors = bz_errors(handle)
+        self.scanID = scanID
     }
 
     deinit { bz_free(handle) }
 
     func isDir(_ i: Int) -> Bool { flags[i] & 1 != 0 }
+    /// Moved to the Trash since the scan: no longer listed or counted.
+    func isRemoved(_ i: Int) -> Bool { flags[i] & 2 != 0 }
+
+    /// This tree without `node` and its contents, as if the scan had never
+    /// seen them. Node IDs keep their meaning. Nil for the root.
+    func without(_ node: Int) -> Tree? {
+        guard node > 0, node < count, let h = bz_without(handle, UInt32(node)) else { return nil }
+        guard let tree = Tree(handle: h, scanID: scanID) else {
+            bz_free(h)
+            return nil
+        }
+        return tree
+    }
 
     func cleanupDescription(_ index: Int) -> String {
         guard let label = bz_cleanup_description(handle, UInt64(index)) else { return "" }
@@ -240,6 +257,36 @@ final class ScanModel {
     func reveal(_ node: Int) {
         if let tree, !tree.ancestry(node).contains(viewRoot) { viewRoot = 0 }
         selection = node
+    }
+
+    @ObservationIgnored private let trashObserver = TrashObserver()
+    @ObservationIgnored private var removals: Task<Void, Never>?
+
+    init() {
+        trashObserver.onTrash = { [weak self] path in self?.removeTrashed(path: path) }
+    }
+
+    /// Take an item moved to the Trash out of the tree on screen, so the
+    /// list, the maps and the totals stop counting it without a rescan.
+    /// Removals run one after another, each on the tree the last one left.
+    func removeTrashed(path: String) {
+        let previous = removals
+        removals = Task {
+            await previous?.value
+            guard !scanning, let tree, let node = tree.node(at: path), node != 0 else { return }
+            let result = await Task.detached(priority: .userInitiated) { () -> (Tree, [CleanupItem])? in
+                guard let pruned = tree.without(node) else { return nil }
+                return (pruned, Cleanup.find(in: pruned))
+            }.value
+            // A rescan may have replaced the tree meanwhile; it no longer has the item.
+            guard let (pruned, found) = result, self.tree === tree else { return }
+            if pruned.isRemoved(viewRoot) { viewRoot = Int(pruned.parents[node]) }
+            if let sel = selection, pruned.isRemoved(sel) { selection = nil }
+            if let hov = hovered, pruned.isRemoved(hov) { hovered = nil }
+            self.tree = pruned
+            cleanup = found
+            agentRun?.adopt(pruned, replacing: tree)
+        }
     }
     var hovered: Int? = nil
     var freeBytes: UInt64 = 0

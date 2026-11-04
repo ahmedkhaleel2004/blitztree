@@ -605,6 +605,11 @@ final class SunburstNSView: NSView {
     /// file is selected.
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        // A view that handles mouseDown gets Control-click here, not in menu(for:).
+        if event.modifierFlags.contains(.control), let menu = menu(for: event) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
         // The second click of a double-click would land on the zoomed chart
         // and zoom again.
         guard event.clickCount == 1, let model, let tree = model.tree else { return }
@@ -627,14 +632,15 @@ final class SunburstNSView: NSView {
         }
     }
 
-    override func rightMouseDown(with event: NSEvent) {
+    /// The menu for right-click, and for Control-click through mouseDown.
+    override func menu(for event: NSEvent) -> NSMenu? {
         guard let model, let tree = model.tree,
               case let .segment(i) = hit(convert(event.locationInWindow, from: nil)),
               segments[i].node >= 0
-        else { return }
+        else { return nil }
         model.selection = segments[i].node
         needsDisplay = true
-        NodeMenu.popUp(path: tree.path(segments[i].node), with: event, for: self)
+        return NodeMenu.make(path: tree.path(segments[i].node))
     }
 }
 

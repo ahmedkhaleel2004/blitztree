@@ -430,6 +430,11 @@ final class TreemapNSView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
+        // A view that handles mouseDown gets Control-click here, not in menu(for:).
+        if event.modifierFlags.contains(.control), let menu = menu(for: event) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+            return
+        }
         let p = convert(event.locationInWindow, from: nil)
         guard let model, let tree = model.tree else { return }
         if event.clickCount == 2 {
@@ -457,12 +462,13 @@ final class TreemapNSView: NSView {
         }
     }
 
-    override func rightMouseDown(with event: NSEvent) {
+    /// The menu for right-click, and for Control-click through mouseDown.
+    override func menu(for event: NSEvent) -> NSMenu? {
         let p = convert(event.locationInWindow, from: nil)
-        guard let model, let tree = model.tree, let leaf = hit(p) else { return }
+        guard let model, let tree = model.tree, let leaf = hit(p) else { return nil }
         model.selection = leaf.node
         syncOverlay()
-        NodeMenu.popUp(path: tree.path(leaf.node), with: event, for: self)
+        return NodeMenu.make(path: tree.path(leaf.node))
     }
 }
 
@@ -523,6 +529,10 @@ final class NodeMenu: NSObject {
     private static let shared = NodeMenu()
 
     static func popUp(path: String, with event: NSEvent, for view: NSView) {
+        NSMenu.popUpContextMenu(make(path: path), with: event, for: view)
+    }
+
+    static func make(path: String) -> NSMenu {
         let menu = NSMenu()
         for (title, action) in [("Reveal in Finder", #selector(revealInFinder(_:))),
                                 ("Copy Path", #selector(copyPath(_:))),
@@ -533,7 +543,7 @@ final class NodeMenu: NSObject {
             item.representedObject = path
             menu.addItem(item)
         }
-        NSMenu.popUpContextMenu(menu, with: event, for: view)
+        return menu
     }
 
     @objc private func revealInFinder(_ sender: NSMenuItem) {
@@ -555,10 +565,35 @@ final class NodeMenu: NSObject {
         alert.informativeText = path
         alert.addButton(withTitle: "Move to Trash")
         alert.addButton(withTitle: "Cancel")
-        if alert.runModal() == .alertFirstButtonReturn {
-            try? FileManager.default.trashItem(at: url, resultingItemURL: nil)
-            // Note: sizes refresh on next rescan; v1 keeps it simple.
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        do {
+            try FileManager.default.trashItem(at: url, resultingItemURL: nil)
+        } catch {
+            let failed = NSAlert()
+            failed.alertStyle = .warning
+            failed.messageText = "\u{201C}\(url.lastPathComponent)\u{201D} couldn\u{2019}t be moved to the Trash."
+            failed.informativeText = error.localizedDescription
+            failed.runModal()
+            return
         }
+        NotificationCenter.default.post(name: TrashObserver.didTrash, object: path)
+    }
+}
+
+/// Hands each Move to Trash to a window's model. Selector observers are
+/// removed automatically when they go away.
+final class TrashObserver: NSObject {
+    /// Posted with the path as the object after an item goes to the Trash.
+    static let didTrash = Notification.Name("BlitzTreeDidTrash")
+    var onTrash: ((String) -> Void)?
+
+    override init() {
+        super.init()
+        NotificationCenter.default.addObserver(self, selector: #selector(trashed(_:)), name: Self.didTrash, object: nil)
+    }
+
+    @objc private func trashed(_ note: Notification) {
+        if let path = note.object as? String { onTrash?(path) }
     }
 }
 
