@@ -80,6 +80,7 @@ fn main() {
                     View {
                         parents: s(bz_parents(handle), n),
                         alloc: s(bz_alloc(handle), n),
+                        unique: s(bz_unique(handle), n),
                         logical: s(bz_logical(handle), n),
                         n_files: s(bz_nfiles(handle), n),
                         flags: s(bz_flags(handle), n),
@@ -351,6 +352,7 @@ fn naive_walk_par<'s>(scope: &rayon::Scope<'s>, dir: &Path, c: &'s AtomicCounts)
 struct View<'a> {
     parents: &'a [u32],
     alloc: &'a [u64],
+    unique: &'a [u64],
     logical: &'a [u64],
     n_files: &'a [u32],
     flags: &'a [u8],
@@ -376,7 +378,7 @@ fn fnv(mut h: u64, bytes: &[u8]) -> u64 {
 fn digest(f: &View) {
     let n = f.parents.len();
     let name = |i: usize| &f.name_blob[f.name_off[i] as usize..f.name_off[i + 1] as usize];
-    assert!(f.alloc.len() == n && f.logical.len() == n && f.n_files.len() == n && f.flags.len() == n);
+    assert!(f.alloc.len() == n && f.unique.len() == n && f.logical.len() == n && f.n_files.len() == n && f.flags.len() == n);
     assert!(f.child_off.len() == n + 1 && f.name_off.len() == n + 1);
     assert_eq!(f.child_off[0], 0);
     assert_eq!(f.name_off[0], 0);
@@ -389,19 +391,21 @@ fn digest(f: &View) {
         let kids = &f.children[f.child_off[i] as usize..f.child_off[i + 1] as usize];
         let is_dir = f.flags[i] & 1 != 0;
         assert!(is_dir || kids.is_empty());
-        let (mut a, mut l, mut nf) = (0u64, 0u64, 0u32);
+        let (mut a, mut u, mut l, mut nf) = (0u64, 0u64, 0u64, 0u32);
         for (j, &k) in kids.iter().enumerate() {
             let k = k as usize;
             assert_eq!(f.parents[k] as usize, i, "child's parent");
             assert!(!seen[k], "child listed twice");
             seen[k] = true;
-            assert!(j == 0 || f.alloc[kids[j - 1] as usize] >= f.alloc[k], "children sorted by alloc desc");
+            assert!(j == 0 || f.unique[kids[j - 1] as usize] >= f.unique[k], "children sorted by unique desc");
+            assert!(f.unique[k] <= f.alloc[k], "unique within alloc");
             a += f.alloc[k];
+            u += f.unique[k];
             l += f.logical[k];
             nf += if f.flags[k] & 1 != 0 { f.n_files[k] } else { 1 };
         }
         if is_dir {
-            assert_eq!((f.alloc[i], f.logical[i], f.n_files[i]), (a, l, nf), "dir totals");
+            assert_eq!((f.alloc[i], f.unique[i], f.logical[i], f.n_files[i]), (a, u, l, nf), "dir totals");
         }
     }
     // Children always come after their parent, so paths hash in one pass.
@@ -421,7 +425,7 @@ fn digest(f: &View) {
         kids.iter().fold(FNV, |h, &k| fnv(fnv(h, name(k as usize)), &[0xff]))
     };
     let mut rows: Vec<_> = (0..n)
-        .map(|i| (ph[i], f.alloc[i], f.logical[i], f.n_files[i], f.flags[i], order(i)))
+        .map(|i| (ph[i], f.alloc[i], f.logical[i], f.n_files[i], f.flags[i], order(i), f.unique[i]))
         .collect();
     rows.sort_unstable();
     // `shape` leaves out sizes and order.
@@ -436,14 +440,15 @@ fn digest(f: &View) {
         h = fnv(h, &r.3.to_le_bytes());
         h = fnv(h, &[r.4]);
         h = fnv(h, &r.5.to_le_bytes());
+        h = fnv(h, &r.6.to_le_bytes());
     }
     let mut cleanup = FNV;
     for (node, label) in &f.cleanup {
         cleanup = fnv(fnv(cleanup, &ph[*node as usize].to_le_bytes()), label.as_bytes());
     }
     println!(
-        "digest {h:016x}  shape {shape:016x}  cleanup {cleanup:016x} ({})  nodes {n}  alloc {}  logical {}  files {}  errors {}  (invariants ok)",
-        f.cleanup.len(), f.alloc[0], f.logical[0], f.n_files[0], f.errors
+        "digest {h:016x}  shape {shape:016x}  cleanup {cleanup:016x} ({})  nodes {n}  alloc {}  unique {}  logical {}  files {}  errors {}  (invariants ok)",
+        f.cleanup.len(), f.alloc[0], f.unique[0], f.logical[0], f.n_files[0], f.errors
     );
     if let Some(out) = std::env::var_os("BZ_DUMP") {
         let mut paths: Vec<String> = Vec::with_capacity(n);

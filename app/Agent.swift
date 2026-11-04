@@ -503,9 +503,11 @@ final class PlanItem: Identifiable {
     var trashed: [URL] = []
     var trashedBytes: UInt64 = 0
 
-    /// What deleting it frees by the scan (blocks shared with APFS clones
-    /// don't count) when the scan saw its paths, else the agent's figure.
-    let bytes: UInt64
+    /// The scan's size of its paths, else the agent's figure. Once the plan
+    /// is written, `AgentRun` replaces a scanned figure with what deleting
+    /// frees (blocks shared with APFS clones don't count), which asks the
+    /// file system and so is measured off the main thread.
+    var bytes: UInt64
     /// Its folders in the scan the plan was made from, for the treemap.
     let nodes: [Int]
 
@@ -583,8 +585,7 @@ final class PlanItem: Identifiable {
         // blocks another file keeps); the agent's guess is only for paths
         // the scan never saw.
         self.nodes = Array(outer)
-        bytes = outer.isEmpty ? UInt64(max(0, spec.bytes))
-            : tree.reclaimable(outer.map { UInt32($0) }).reduce(0, +)
+        bytes = outer.isEmpty ? UInt64(max(0, spec.bytes)) : outer.reduce(0) { $0 + tree.size[$1] }
     }
 
     var isCommand: Bool { spec.action == "command" && !viaTrash }
@@ -767,7 +768,7 @@ final class AgentRun {
     }
 
     private func handle(_ event: AgentStreamReader.Event) {
-        guard phase == .thinking else { return }
+        guard phase == .thinking, !measuring else { return }
         switch event {
         case .activity(let text):
             step(text)
@@ -790,7 +791,7 @@ final class AgentRun {
 
     private func processEnded(status: Int32, stderr: String) {
         process = nil
-        guard phase == .thinking else { return }
+        guard phase == .thinking, !measuring else { return }
         if !items.isEmpty {
             finishPlanning()
         } else if status != 0 {
@@ -800,8 +801,29 @@ final class AgentRun {
         }
     }
 
+    /// Set while the finished plan's sizes are measured, so a late event or
+    /// the agent exiting doesn't finish the plan twice.
+    private var measuring = false
+
     private func finishPlanning() {
         planSeconds = -startedAt.timeIntervalSinceNow
+        measuring = true
+        let items = self.items, tree = self.tree
+        let nodes = items.map { $0.nodes.map(UInt32.init) }
+        Task { [weak self] in
+            // What deleting each item frees reads partly cloned files'
+            // attributes, so it runs off the main thread.
+            let freed = await Task.detached(priority: .userInitiated) {
+                nodes.map { $0.isEmpty ? nil : tree.reclaimable($0).reduce(0, +) }
+            }.value
+            guard let self, phase == .thinking else { return }
+            for (item, bytes) in zip(items, freed) { if let bytes { item.bytes = bytes } }
+            showPlan()
+        }
+    }
+
+    private func showPlan() {
+        measuring = false
         items.sort { $0.bytes > $1.bytes }
         if summary.isEmpty {
             summary = "About \(Fmt.size(items.filter { $0.blocked == nil }.reduce(0) { $0 + $1.bytes })) can go."

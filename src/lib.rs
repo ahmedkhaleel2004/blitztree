@@ -1316,6 +1316,41 @@ mod tests {
     }
 
     #[test]
+    fn a_hard_linked_clone_counts_once() {
+        const COPY: u64 = 4 << 20;
+        let root = std::env::temp_dir().join(format!("bz-test-linked-clone-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for dir in ["a", "b"] {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+        }
+        let original = root.join("a/original");
+        std::fs::write(&original, vec![7u8; COPY as usize]).unwrap();
+        if !clonefile(&original, &root.join("a/clone")) {
+            let _ = std::fs::remove_dir_all(&root);
+            eprintln!("skipped: temp dir is not on APFS ({})", std::io::Error::last_os_error());
+            return;
+        }
+        // A second name for the clone: one inode, so one clone, not two.
+        std::fs::hard_link(root.join("a/clone"), root.join("b/link")).unwrap();
+
+        let t = scan(&root, &Progress::default());
+        let reclaim = t.reclaimable(&[0]);
+        let _ = std::fs::remove_dir_all(&root);
+        assert_eq!(t.errors, 0);
+        let near = |a: u64, b: u64| a.abs_diff(b) <= 64 << 10;
+        let find = |n: &str| (0..t.len()).find(|&i| t.name(i) == n).unwrap();
+
+        assert_eq!(t.n_files[0], 3, "every name is listed");
+        assert!(near(t.alloc[0], 2 * COPY), "the link's bytes count once: {}", t.alloc[0]);
+        assert_eq!(t.alloc[find("link")], 0, "a/clone sorts first and carries the bytes");
+        assert!(near(t.unique[0], COPY), "the original and its clone are one copy: {}", t.unique[0]);
+        assert_eq!(t.clone_members.len(), 2, "the zeroed link is not a clone member");
+        assert_eq!(t.clone_groups.len(), 1);
+        assert!(near(t.clone_groups[0].shared, COPY));
+        assert_eq!(reclaim, [0], "shared blocks never count as freed");
+    }
+
+    #[test]
     fn clone_owner_does_not_depend_on_discovery_order() {
         let clone = [None, None, Some((77, 30)), Some((77, 10)), Some((77, 20)), Some((78, 40))];
         for order in [[2, 3, 4, 5], [5, 4, 2, 3], [3, 5, 4, 2]] {
