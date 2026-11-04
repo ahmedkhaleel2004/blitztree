@@ -525,13 +525,9 @@ nonisolated private enum Scan {
     }
 }
 
-/// Right-click menu for a file or folder, shared by the treemap and rings.
+/// Right-click menu for a file or folder, shared by the list, treemap and rings.
 final class NodeMenu: NSObject {
     private static let shared = NodeMenu()
-
-    static func popUp(path: String, with event: NSEvent, for view: NSView) {
-        NSMenu.popUpContextMenu(make(path: path), with: event, for: view)
-    }
 
     static func make(path: String) -> NSMenu {
         let menu = NSMenu()
