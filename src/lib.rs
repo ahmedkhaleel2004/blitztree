@@ -929,6 +929,7 @@ mod tests {
             ("a/y", 1, 0, true),
             ("c/w", 3, 8, false),
             ("a/y/z", 5, 5, false),
+            ("a/y/v", 5, 6, false),
         ];
         let gone = |p: &str| skip.is_some_and(|s| p == s || p.starts_with(&format!("{s}/")));
         let mut t = Tree::with_root("/small");
@@ -964,7 +965,7 @@ mod tests {
 
     #[test]
     fn without_matches_a_rescan_that_never_saw_the_item() {
-        for gone in ["a/x", "a/y", "a/y/z", "a", "b", "c/w"] {
+        for gone in ["a/x", "a/y", "a/y/z", "a/y/v", "a", "b", "c/w"] {
             let full = small(None);
             let node = find(&full, gone);
             let t = full.without(node);
@@ -980,11 +981,17 @@ mod tests {
             // Removing it again changes nothing.
             assert_eq!(t.without(node), t);
         }
-        // Siblings move when an ancestor shrinks past them.
+        // Siblings move when an ancestor shrinks past them, at the root and
+        // below it: a/y (11) drops below a/x (10) when a/y/v goes.
+        let names = |t: &Tree, i: usize| -> Vec<String> { t.kids(i).iter().map(|&c| t.name(c as usize).to_string()).collect() };
         let t = small(None);
-        let t = t.without(find(&t, "a/x"));
-        let order: Vec<_> = t.kids(0).iter().map(|&c| t.name(c as usize)).collect();
-        assert_eq!(order, ["c", "b", "a"]);
+        assert_eq!(names(&t, find(&t, "a")), ["y", "x"]);
+        assert_eq!(names(&t, 0), ["a", "c", "b"]);
+        let a = find(&t, "a");
+        let t = t.without(find(&t, "a/y/v"));
+        assert_eq!(names(&t, a), ["x", "y"]);
+        let t = t.without(find(&t, "c/w"));
+        assert_eq!(names(&t, 0), ["a", "b", "c"]);
     }
 
     #[test]

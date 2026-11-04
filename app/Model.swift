@@ -273,7 +273,12 @@ final class ScanModel {
         let previous = removals
         removals = Task {
             await previous?.value
-            guard !scanning, let tree, let node = tree.node(at: path), node != 0 else { return }
+            // A whole-disk window names /Users/… as /System/Volumes/Data/Users/…;
+            // a window scanned at /Users/… knows it by the short name.
+            let data = "/System/Volumes/Data"
+            let short = path.hasPrefix(data + "/") ? String(path.dropFirst(data.count)) : nil
+            guard !scanning, let tree, let node = tree.node(at: path) ?? short.flatMap(tree.node(at:)), node != 0
+            else { return }
             let result = await Task.detached(priority: .userInitiated) { () -> (Tree, [CleanupItem])? in
                 guard let pruned = tree.without(node) else { return nil }
                 return (pruned, Cleanup.find(in: pruned))

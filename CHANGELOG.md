@@ -2,7 +2,7 @@
 
 ## Unreleased
 
-- Control-click a file or folder in the treemap or the rings for the same menu as right-click.
+- Control-click a file in the treemap, or a file or folder in the rings, for the same menu as right-click.
 - Move to Trash from that menu takes the item out of the list, the map and the totals right away, without a rescan. If it can't be moved, BlitzTree says why instead of doing nothing.
 
 ## 0.5.6 — 2026-09-27

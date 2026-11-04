@@ -430,9 +430,10 @@ final class TreemapNSView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         window?.makeFirstResponder(self)
-        // A view that handles mouseDown gets Control-click here, not in menu(for:).
-        if event.modifierFlags.contains(.control), let menu = menu(for: event) {
-            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        // A view that handles mouseDown gets Control-click here, not in
+        // menu(for:). Like a right-click, it never selects or zooms.
+        if event.modifierFlags.contains(.control) {
+            if let menu = menu(for: event) { NSMenu.popUpContextMenu(menu, with: event, for: self) }
             return
         }
         let p = convert(event.locationInWindow, from: nil)
