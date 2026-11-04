@@ -68,6 +68,10 @@ void bz_reclaimable(BzScan *h, const uint32_t *nodes, uint64_t count, uint64_t *
 const char *bz_cleanup_description(BzScan *h, uint64_t index) {
     return index < h->cleanup_count ? h->cleanup_descriptions[index] : NULL;
 }
+// Fixtures are never saved or loaded.
+BzScan *bz_cache_load(const char *cache_path, const char *root) { (void)cache_path; (void)root; return NULL; }
+int bz_cache_save(BzScan *h, const char *cache_path) { (void)h; (void)cache_path; return -1; }
+double bz_scanned_at(BzScan *h) { (void)h; return 0; }
 void bz_free(BzScan *h) {
     if (!h) return;
     for (uint32_t i = 0; i < h->cleanup_count; ++i) free(h->cleanup_descriptions[i]);
