@@ -267,12 +267,8 @@ nonisolated enum ReferenceAgentPrompt {
           - paths: the absolute paths it covers.
           - action: "command" when the owning tool has its own cleanup and the item is that tool's \
         cache, otherwise "trash" (BlitzTree moves the paths to the Trash itself). BlitzTree only runs \
-        commands starting with one of: `uv cache clean`, `bun pm cache rm`, `npm cache clean --force`, \
-        `pnpm store prune`, `yarn cache clean`, `brew cleanup --prune=all`, `docker system prune -f`, \
-        `docker builder prune -f`, `xcrun simctl delete unavailable`, `xcrun simctl runtime delete <id>`, \
-        `xcrun simctl erase <udid>`, `pip cache purge`, `ollama rm <model>`, `go clean -modcache`, \
-        `gem cleanup`, `pod cache clean --all`, `conda clean -a -y`. Nothing else, no pipes, `;`, `$` or \
-        globs; it must not prompt.
+        these exact commands: \(CleanupCommand.promptExamples). No additional options or paths, \
+        shell syntax or globbing; the command must not prompt.
           - command: the exact command for "command", "" for "trash".
         `npm cache clean` only empties ~/.npm/_cacache; ~/.npm/_npx is a separate "trash" item. Only \
         list caches that appear in the tables above with their real size; skip ones that are not there.

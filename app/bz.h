@@ -26,7 +26,19 @@ uint64_t bz_errors(BzScan *h);
 uint64_t bz_cleanup_count(BzScan *h);
 const uint32_t *bz_cleanup_nodes(BzScan *h);
 // index is a candidate-list index, not a tree node index. NULL out of range.
+// Candidates do not nest, except inside a container kind ("git_worktree"),
+// which is listed AND descended: sum only outermost candidates for totals.
+// Rules are anchored to $HOME (and its /System/Volumes/Data spelling).
 const char *bz_cleanup_description(BzScan *h, uint64_t index);
+// Stable rule id, e.g. "node_modules", "git_worktree" (static string).
+const char *bz_cleanup_kind_id(BzScan *h, uint64_t index);
+// "build", "packages", "apps", "devtools", "models", "agents" or "worktrees".
+const char *bz_cleanup_section_id(BzScan *h, uint64_t index);
+// 0 safe, 1 review, 255 out of range.
+uint8_t bz_cleanup_group(BzScan *h, uint64_t index);
+// Check required before acting: "" none, else "cachedir_tag", "git_worktree",
+// "recent_activity" or "agent_session".
+const char *bz_cleanup_verify(BzScan *h, uint64_t index);
 
 void bz_free(BzScan *h);
 

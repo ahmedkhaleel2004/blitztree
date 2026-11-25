@@ -21,9 +21,14 @@ for old,new in changes.items():
     source=source.replace(old,new)
 p.write_text(source)
 p=Path(sys.argv[2]); source=p.read_text()
-old='try FileManager.default.trashItem(at: URL(fileURLWithPath: item.path), resultingItemURL: nil)'
+old='''                        guard let target = item.target else {
+                            throw CleanupOperations.failure("This folder could not be validated; rescan before cleaning")
+                        }
+                        // Revalidating at the boundary checks the folder again
+                        // (it may have been used since the scan), rule check included.
+                        receipts.append(try CleanupOperations.trash(target, move: move))'''
 assert source.count(old)==1, 'Expected one manual-trash operation'
-p.write_text(source.replace(old, 'try AgentBenchmarkTrash.move(item)'))
+p.write_text(source.replace(old, '                        try AgentBenchmarkTrash.move(item)'))
 p=Path(sys.argv[3]); source=p.read_text()
 old='''    func startAgent(_ agent: InstalledAgent) {
 '''
@@ -34,9 +39,9 @@ assert source.count(old)==1, 'Expected one agent start'
 p.write_text(source.replace(old, new))
 PY
 clang -O2 -mmacosx-version-min=14.0 -c benchmarks/ui_fixture.c -o "$AGENT_BENCH_TMP/fixture.o"
-swiftc "$AGENT_BENCH_TMP"/app/Agent.swift "$AGENT_BENCH_TMP"/app/Cleanup.swift \
-  "$AGENT_BENCH_TMP"/app/ContentView.swift "$AGENT_BENCH_TMP"/app/Model.swift \
-  "$AGENT_BENCH_TMP"/app/Treemap.swift "$AGENT_BENCH_TMP"/app/TreemapView.swift "$AGENT_BENCH_TMP"/app/SunburstView.swift \
+AGENT_BENCH_SOURCES=("$AGENT_BENCH_TMP"/app/*.swift)
+AGENT_BENCH_SOURCES=(${AGENT_BENCH_SOURCES:#*/Main.swift})
+swiftc "${AGENT_BENCH_SOURCES[@]}" \
   benchmarks/AgentReference.swift benchmarks/AgentPerformance.swift "$AGENT_BENCH_TMP/fixture.o" \
   -import-objc-header benchmarks/ui_fixture.h \
   -O -parse-as-library -swift-version 6 -default-isolation MainActor \

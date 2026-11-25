@@ -60,6 +60,25 @@ nonisolated final class Tree: @unchecked Sendable {
         return String(cString: label)
     }
 
+    func cleanupKindId(_ index: Int) -> String {
+        guard let id = bz_cleanup_kind_id(handle, UInt64(index)) else { return "" }
+        return String(cString: id)
+    }
+
+    func cleanupSectionId(_ index: Int) -> String {
+        guard let id = bz_cleanup_section_id(handle, UInt64(index)) else { return "" }
+        return String(cString: id)
+    }
+
+    func cleanupGroup(_ index: Int) -> UInt8 {
+        bz_cleanup_group(handle, UInt64(index))
+    }
+
+    /// Check the engine's rule requires (`""` none, `nil` when missing or out of range).
+    func cleanupVerify(_ index: Int) -> String? {
+        bz_cleanup_verify(handle, UInt64(index)).map { String(cString: $0) }
+    }
+
     func name(_ i: Int) -> String {
         let start = Int(nameOff[i])
         let end = Int(nameOff[i + 1])
@@ -350,6 +369,7 @@ final class ScanModel {
                 cleanup = found
                 openPanelAfterLaunchScan()
             }
+            Task { await cleanupTrash.settleWorktrees() }
             NSLog("BZ scan done: %llu nodes, %llu unreadable dirs", UInt64(tree.count), tree.errors)
         }
         freeBytes = space.free ?? 0

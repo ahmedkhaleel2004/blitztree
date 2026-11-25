@@ -22,7 +22,7 @@ nonisolated enum ReferenceCleanup {
                         var display = tree.displayPath(child)
                         if display.hasPrefix(home) { display = "~" + display.dropFirst(home.count) }
                         found.append(CleanupItem(node: child, path: path, display: display,
-                                                 kind: kind, bytes: tree.alloc[child]))
+                                                 kind: kind, bytes: tree.alloc[child], verify: ""))
                     }
                 } else {
                     stack.append(child)
