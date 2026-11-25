@@ -25,5 +25,39 @@ struct BlitzTreeApp: App {
                 Button("Check for Updates…") { updater.checkForUpdates(nil) }
             }
         }
+
+        Settings {
+            SettingsView()
+                .preferredColorScheme(.dark)
+        }
+    }
+}
+
+private struct SettingsView: View {
+    @AppStorage(ScanModel.launchTargetKey) private var launchTarget = LaunchTarget.macintoshHD.rawValue
+    @AppStorage(ScanModel.autoAnalyzeKey) private var autoAnalyze = false
+
+    var body: some View {
+        Form {
+            VStack(alignment: .leading, spacing: 6) {
+                Picker("At launch", selection: $launchTarget) {
+                    ForEach(LaunchTarget.allCases) { target in
+                        Text(target.label).tag(target.rawValue)
+                    }
+                }
+                .frame(width: 280)
+                Text("What to scan when BlitzTree opens.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+            VStack(alignment: .leading, spacing: 6) {
+                Toggle("Auto-analyse suggestions", isOn: $autoAnalyze)
+                Text("Automatically plan cleanup with AI after the launch scan instead of waiting for a click. Off by default so nothing leaves your Mac unprompted.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+        .padding(20)
+        .frame(width: 440)
     }
 }

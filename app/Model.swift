@@ -153,9 +153,36 @@ enum MapStyle: String {
     case treemap, rings
 }
 
+/// What to scan when BlitzTree opens.
+enum LaunchTarget: String, CaseIterable, Identifiable, Sendable {
+    case macintoshHD = "macintosh_hd"
+    case home = "home"
+    case prompt = "prompt"
+
+    var id: String { rawValue }
+
+    var label: String {
+        switch self {
+        case .macintoshHD: return "Scan Macintosh HD"
+        case .home: return "Scan Home folder"
+        case .prompt: return "Choose folder…"
+        }
+    }
+}
+
 @Observable
 @MainActor
 final class ScanModel {
+    static let launchTargetKey = "bz.launchTarget"
+    static let autoAnalyzeKey = "bz.autoAnalyze"
+
+    static func launchArgumentPath() -> String? {
+        guard CommandLine.arguments.count > 1 else { return nil }
+        var isDir: ObjCBool = false
+        let p = (CommandLine.arguments[1] as NSString).expandingTildeInPath
+        return FileManager.default.fileExists(atPath: p, isDirectory: &isDir) && isDir.boolValue ? p : nil
+    }
+
     var files: UInt64 = 0
     var dirs: UInt64 = 0
     var bytes: UInt64 = 0
@@ -164,16 +191,24 @@ final class ScanModel {
     var tree: Tree?
     var scanRoot: String = {
         // `BlitzTree /some/path` scans that path on launch (also handy for QA).
-        if CommandLine.arguments.count > 1 {
-            var isDir: ObjCBool = false
-            let p = (CommandLine.arguments[1] as NSString).expandingTildeInPath
-            if FileManager.default.fileExists(atPath: p, isDirectory: &isDir), isDir.boolValue {
-                return p
-            }
+        if let arg = ScanModel.launchArgumentPath() {
+            return arg
+        }
+        let target = LaunchTarget(rawValue: UserDefaults.standard.string(forKey: ScanModel.launchTargetKey) ?? "") ?? .macintoshHD
+        if target == .home {
+            return FileManager.default.homeDirectoryForCurrentUser.path
         }
         // Whole disk by default: the user-data volume of the boot volume group.
         return "/System/Volumes/Data"
     }()
+    var launchTarget: LaunchTarget {
+        get { LaunchTarget(rawValue: UserDefaults.standard.string(forKey: Self.launchTargetKey) ?? "") ?? .macintoshHD }
+        set { UserDefaults.standard.set(newValue.rawValue, forKey: Self.launchTargetKey) }
+    }
+    var autoAnalyze: Bool {
+        get { UserDefaults.standard.bool(forKey: Self.autoAnalyzeKey) }
+        set { UserDefaults.standard.set(newValue, forKey: Self.autoAnalyzeKey) }
+    }
     /// Coding agents found on this Mac (Claude Code, Codex) and the user's PATH.
     var agentEnv = AgentEnvironment()
     /// The agent cleanup on screen, if any.
@@ -202,11 +237,15 @@ final class ScanModel {
     }
 
     /// After the launch scan: open the panel on the Clean Up button or the
-    /// setup offer. Nothing goes to an agent until the user clicks.
+    /// setup offer, or automatically start cleanup when auto-analyse is enabled.
     func openPanelAfterLaunchScan() {
         guard !panelOpenedAfterLaunch, agentEnv.loaded, tree != nil, !scanning,
               !cleanupTrash.running, agentRun == nil else { return }
         panelOpenedAfterLaunch = true
+        if autoAnalyze, let agent = preferredAgent {
+            startAgent(agent)
+            return
+        }
         panelRequests += 1
         // QA only: BZ_QA_SETUP=claude|codex presses the setup button.
         if preferredAgent == nil, let kind = ProcessInfo.processInfo.environment["BZ_QA_SETUP"].flatMap(AgentKind.init) { setUp(kind) }

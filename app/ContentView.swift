@@ -72,12 +72,29 @@ struct ContentView: View {
         .onChange(of: model.panelRequests) { showCleanup = true }
         .hidingWindowTitle()
         .onAppear {
-            // Never start a whole-disk scan without FDA: every protected
-            // app container would fire a permission prompt.
-            if FDA.isActive() {
-                model.startScan()
-            } else {
-                needsFDA = true
+            if let arg = ScanModel.launchArgumentPath() {
+                if FDA.isActive() {
+                    model.startScan(path: arg)
+                } else {
+                    needsFDA = true
+                }
+                return
+            }
+            switch model.launchTarget {
+            case .prompt:
+                DispatchQueue.main.async {
+                    chooseFolder()
+                }
+            case .home:
+                model.startScan(path: FileManager.default.homeDirectoryForCurrentUser.path)
+            case .macintoshHD:
+                // Never start a whole-disk scan without FDA: every protected
+                // app container would fire a permission prompt.
+                if FDA.isActive() {
+                    model.startScan(path: "/System/Volumes/Data")
+                } else {
+                    needsFDA = true
+                }
             }
         }
     }
