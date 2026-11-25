@@ -5,8 +5,10 @@ import AppKit
 struct ContentView: View {
     @State private var model = ScanModel()
     @State private var showTable = true
+    @State private var listMode: ListMode = .folders
     @AppStorage("bz.showCleanup") private var showCleanup = false
     @AppStorage("bz.listWidth") private var listWidth = 390.0
+    @AppStorage("bz.typesWidth") private var typesWidth = 300.0
 
     var body: some View {
         VStack(spacing: 0) {
@@ -24,13 +26,35 @@ struct ContentView: View {
                     // seconds after every scan with the panel open.
                     HStack(spacing: 0) {
                         if showTable {
-                            OutlinePanel(model: model)
-                                .frame(width: listWidth)
+                            VStack(spacing: 0) {
+                                Picker("List", selection: $listMode) {
+                                    Text("Folders").tag(ListMode.folders)
+                                    Text("Largest Files").tag(ListMode.largestFiles)
+                                }
+                                .pickerStyle(.segmented)
+                                .labelsHidden()
+                                .padding(.horizontal, 8)
+                                .padding(.vertical, 6)
+                                // The outline stays in the hierarchy (see above);
+                                // the file list covers it rather than replacing it.
+                                ZStack {
+                                    OutlinePanel(model: model)
+                                    if listMode == .largestFiles {
+                                        LargestFilesList(model: model)
+                                    }
+                                }
+                            }
+                            .frame(width: listWidth)
                             ListDivider(width: $listWidth)
+                        }
+                        if model.showTypes {
+                            TypesPanel(model: model)
+                                .frame(width: typesWidth)
+                            ListDivider(width: $typesWidth)
                         }
                         Group {
                             switch model.mapStyle {
-                            case .treemap: TreemapView(model: model)
+                            case .treemap: TreemapView(model: model, highlight: model.highlightedType)
                             case .rings: SunburstView(model: model)
                             }
                         }
@@ -64,6 +88,7 @@ struct ContentView: View {
         }
         .toolbar { toolbar }
         .task {
+            model.watchVolumes()
             model.agentEnv = await AgentLocator.find()
             model.openPanelAfterLaunchScan()
         }
@@ -139,7 +164,17 @@ struct ContentView: View {
 
         ToolbarItemGroup(placement: .automatic) {
             Menu {
-                Button("Macintosh HD") { model.startScan(path: "/System/Volumes/Data") }
+                ForEach(model.volumes) { volume in
+                    Button {
+                        model.startScan(path: volume.path)
+                    } label: {
+                        Label(volume.total > 0
+                              ? "\(volume.name) — \(Fmt.size(volume.used)) of \(Fmt.size(volume.total)) used"
+                              : volume.name,
+                              systemImage: volume.isInternal ? "internaldrive" : "externaldrive")
+                    }
+                }
+                Divider()
                 Button("Home") { model.startScan(path: FileManager.default.homeDirectoryForCurrentUser.path) }
                 Divider()
                 Button("Choose Folder…") { chooseFolder() }
@@ -185,6 +220,11 @@ struct ContentView: View {
                 Label("Directory List", systemImage: "sidebar.leading")
             }
             .help("Show directory list")
+
+            Toggle(isOn: $model.showTypes) {
+                Label("File Types", systemImage: "chart.bar.doc.horizontal")
+            }
+            .help("Show space by file type")
 
             Toggle(isOn: $showCleanup) {
                 Label("Clean Up", systemImage: "sparkles")
@@ -363,6 +403,8 @@ private struct ListDivider: View {
 final class NameCell: NSTableCellView {
     private static let font = NSFont.systemFont(ofSize: 13)
     private static let lineHeight = ceil(font.ascender - font.descender + font.leading)
+    /// Text height plus breathing room, so the glyphs never touch the row edges.
+    static let rowHeight = lineHeight + 8
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -642,12 +684,20 @@ struct OutlinePanel: NSViewRepresentable {
         }
     }
 
+    /// The cells use fixed fonts, so the row height must not follow the system
+    /// "Sidebar icon size" setting: Small made rows shorter than the 13pt text
+    /// and clipped it.
+    static func configureRows(_ outline: NSOutlineView) {
+        outline.rowSizeStyle = .custom
+        outline.rowHeight = NameCell.rowHeight
+    }
+
     func makeCoordinator() -> Coordinator { Coordinator() }
 
     func makeNSView(context: Context) -> NSScrollView {
         let outline = NSOutlineView()
         outline.style = .plain
-        outline.rowSizeStyle = .default
+        Self.configureRows(outline)
         outline.usesAlternatingRowBackgroundColors = true
         outline.floatsGroupRows = false
         outline.indentationPerLevel = 13
@@ -702,5 +752,104 @@ private extension View {
         } else {
             navigationTitle("")
         }
+    }
+}
+
+/// Space by file type in the folder on screen (WizTree's Extensions tab).
+/// Picking a row lights that type's files in the treemap.
+struct TypesPanel: View {
+    let model: ScanModel
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            HStack {
+                Text("File Types")
+                    .font(.caption.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Text("Largest first")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+            }
+            .padding(.horizontal, 12)
+            .padding(.vertical, 8)
+            Divider()
+            if let tree = model.tree, model.typesRoot < tree.count {
+                let total = max(tree.alloc[model.typesRoot], 1)
+                ScrollView {
+                    LazyVStack(spacing: 1) {
+                        ForEach(model.typeRows) { row in
+                            TypeRowView(row: row, fraction: Double(row.alloc) / Double(total),
+                                        isSelected: model.selectedType == row.ext) {
+                                model.selectedType = model.selectedType == row.ext ? nil : row.ext
+                            }
+                        }
+                    }
+                    .padding(.vertical, 4)
+                    .padding(.horizontal, 6)
+                }
+                if model.selectedType != nil && model.mapStyle == .rings {
+                    Text("Highlighting shows in the treemap")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                        .padding(8)
+                }
+            }
+        }
+        .frame(maxHeight: .infinity, alignment: .top)
+    }
+}
+
+private struct TypeRowView: View {
+    let row: TypeRow
+    let fraction: Double
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        let kind = row.kind
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                RoundedRectangle(cornerRadius: 3, style: .continuous)
+                    .fill(Color(nsColor: NSColor(deviceRed: kind.color.r, green: kind.color.g, blue: kind.color.b, alpha: 1)))
+                    .frame(width: 12, height: 12)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text(row.ext.isEmpty ? "No extension" : "." + row.name)
+                        .font(.system(size: 12, weight: .medium))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                    if !row.ext.isEmpty {
+                        Text(kind.name)
+                            .font(.system(size: 10))
+                            .foregroundStyle(isSelected ? Color.white.opacity(0.75) : Color.secondary)
+                    }
+                }
+                Spacer(minLength: 6)
+                VStack(alignment: .trailing, spacing: 1) {
+                    Text("\(Fmt.size(row.alloc)) · \(String(format: "%.1f%%", 100 * fraction))")
+                        .font(.system(size: 11))
+                        .monospacedDigit()
+                    Text("\(Fmt.num(row.files)) files")
+                        .font(.system(size: 10))
+                        .monospacedDigit()
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.75) : Color.secondary)
+                }
+            }
+            .foregroundStyle(isSelected ? Color.white : Color.primary)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 4)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background(alignment: .leading) {
+                // Share of the folder, as a bar behind the row.
+                GeometryReader { g in
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(isSelected ? Color.accentColor : Color.primary.opacity(0.07))
+                        .frame(width: isSelected ? g.size.width : g.size.width * min(1, fraction))
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .help(isSelected ? "Click to stop highlighting" : "Highlight these files in the treemap")
     }
 }

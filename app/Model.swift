@@ -73,6 +73,30 @@ nonisolated final class Tree: @unchecked Sendable {
         return UnsafeBufferPointer(start: childArr + start, count: end - start)
     }
 
+    /// The `limit` largest files anywhere in the scan, largest first. Chosen by
+    /// the engine (the CLI's `largest_files` uses the same code).
+    func largestFiles(limit: Int = 1000, minBytes: UInt64 = 0) -> [Int] {
+        guard let list = bz_largest_files(handle, UInt32(limit), minBytes) else { return [] }
+        defer { bz_largest_free(list) }
+        let count = Int(bz_largest_count(list))
+        guard count > 0, let ptr = bz_largest_nodes(list) else { return [] }
+        return (0..<count).map { Int(ptr[$0]) }
+    }
+
+    /// Allocated bytes and file counts per extension under `root`, largest
+    /// first, totalled by the engine in one pass over the files.
+    func types(root: Int) -> [TypeRow] {
+        guard root >= 0, root < count, let t = bz_types(handle, UInt32(root)) else { return [] }
+        defer { bz_types_free(t) }
+        let n = Int(bz_types_count(t))
+        guard n > 0, let off = bz_types_ext_off(t), let blob = bz_types_ext_blob(t),
+              let alloc = bz_types_alloc(t), let files = bz_types_files(t) else { return [] }
+        return (0..<n).map { i in
+            let ext = Array(UnsafeBufferPointer(start: blob + Int(off[i]), count: Int(off[i + 1] - off[i])))
+            return TypeRow(ext: ext, alloc: alloc[i], files: files[i])
+        }
+    }
+
     /// Human-facing path: the Data-volume firmlink prefix reads as "/".
     func displayPath(_ i: Int) -> String {
         let p = path(i)
@@ -122,6 +146,18 @@ nonisolated final class Tree: @unchecked Sendable {
         }
         return cur
     }
+}
+
+/// One extension's share of a folder. `ext` is ASCII-lowercased bytes
+/// without the dot, empty for files without an extension.
+nonisolated struct TypeRow: Sendable, Identifiable {
+    let ext: [UInt8]
+    let alloc: UInt64
+    let files: UInt64
+    var id: [UInt8] { ext }
+    var name: String { String(decoding: ext, as: UTF8.self) }
+    /// Its colour group, from the table the treemap paints with.
+    var kind: TypeColor.Kind { TypeColor.kind(ofExtension: name) }
 }
 
 enum FDA {
@@ -231,6 +267,7 @@ final class ScanModel {
         didSet {
             // A selection outside the folder on screen would read as over 100%.
             if let sel = selection, let tree, !tree.ancestry(sel).contains(viewRoot) { selection = nil }
+            if viewRoot != oldValue { refreshTypes() }
         }
     }
     var selection: Int? = nil
@@ -243,6 +280,36 @@ final class ScanModel {
     }
     var hovered: Int? = nil
     var freeBytes: UInt64 = 0
+    /// Volumes the Scan menu lists; kept current by `watchVolumes`.
+    var volumes: [ScanVolume] = [.bootFallback]
+    private var volumeObservers: [NSObjectProtocol] = []
+    private var volumeListGeneration: UInt64 = 0
+
+    /// Lists mounted volumes now and again whenever one mounts, unmounts or
+    /// is renamed.
+    func watchVolumes() {
+        guard volumeObservers.isEmpty else { return }
+        let center = NSWorkspace.shared.notificationCenter
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification,
+                     NSWorkspace.didRenameVolumeNotification] {
+            volumeObservers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.refreshVolumes() }
+            })
+        }
+        refreshVolumes()
+    }
+
+    /// Re-reads the volume list off the main thread: a slow disk spinning
+    /// up must not stall the window. The newest request wins.
+    func refreshVolumes() {
+        volumeListGeneration &+= 1
+        let generation = volumeListGeneration
+        Task {
+            let found = await Task.detached(priority: .utility) { ScanVolume.mounted() }.value
+            guard generation == volumeListGeneration else { return }
+            volumes = found
+        }
+    }
     /// Rebuildable folders worth deleting, largest first.
     var cleanup: [CleanupItem] = []
     let cleanupTrash = CleanupTrashBatch()
@@ -253,6 +320,48 @@ final class ScanModel {
     }
     var mapStyle: MapStyle = MapStyle(rawValue: UserDefaults.standard.string(forKey: "bz.mapStyle") ?? "") ?? .treemap {
         didSet { UserDefaults.standard.set(mapStyle.rawValue, forKey: "bz.mapStyle") }
+    }
+
+    // MARK: file types
+
+    var showTypes: Bool = UserDefaults.standard.bool(forKey: "bz.showTypes") {
+        didSet {
+            UserDefaults.standard.set(showTypes, forKey: "bz.showTypes")
+            refreshTypes()
+        }
+    }
+    /// Extensions under `typesRoot`, largest first; empty while hidden.
+    var typeRows: [TypeRow] = []
+    /// The folder `typeRows` describes: the view root they were made for.
+    var typesRoot: Int = 0
+    /// The extension picked in the list (see `TypeRow.ext`).
+    var selectedType: [UInt8]?
+    /// What the treemap highlights: the picked type while the list is shown.
+    var highlightedType: [UInt8]? { showTypes ? selectedType : nil }
+    private var typesTask: Task<Void, Never>?
+
+    /// Re-total the folder on screen, off the main thread. Only while the
+    /// list is shown; a zoom or a new tree calls this again.
+    func refreshTypes() {
+        typesTask?.cancel()
+        guard showTypes, let tree else {
+            typeRows = []
+            return
+        }
+        let root = viewRoot
+        typesTask = Task.detached(priority: .userInitiated) { [tree] in
+            let rows = tree.types(root: root)
+            if Task.isCancelled { return }
+            await MainActor.run { [weak self] in
+                guard let self, self.tree === tree, self.viewRoot == root, self.showTypes else { return }
+                self.typeRows = rows
+                self.typesRoot = root
+                // A type with no files in this folder has nothing to light.
+                if let picked = self.selectedType, !rows.contains(where: { $0.ext == picked }) {
+                    self.selectedType = nil
+                }
+            }
+        }
     }
 
     private var handle: OpaquePointer?
@@ -266,6 +375,9 @@ final class ScanModel {
         if let path { scanRoot = path }
         tree = nil
         cleanup = []
+        typesTask?.cancel()
+        typeRows = []
+        selectedType = nil
         viewRoot = 0
         selection = nil
         hovered = nil
@@ -341,6 +453,8 @@ final class ScanModel {
             NSLog("BZ done at %.3f, longest gap between polls %.1f ms", doneAt.timeIntervalSinceReferenceDate, maxPollGap * 1000)
         }
         scanning = false
+        // Used and free change as files come and go; the menu is usable again.
+        refreshVolumes()
         if let tree {
             Task {
                 let found = await Task.detached(priority: .userInitiated) { Cleanup.find(in: tree) }.value
@@ -350,6 +464,7 @@ final class ScanModel {
                 cleanup = found
                 openPanelAfterLaunchScan()
             }
+            refreshTypes()
             NSLog("BZ scan done: %llu nodes, %llu unreadable dirs", UInt64(tree.count), tree.errors)
         }
         freeBytes = space.free ?? 0
@@ -368,17 +483,118 @@ final class ScanModel {
     }
 }
 
-nonisolated private struct VolumeSpace: Sendable {
+nonisolated struct VolumeSpace: Sendable {
     let free: UInt64?
     let used: UInt64?
 
     static func read(_ path: String) -> VolumeSpace {
         let values = try? URL(fileURLWithPath: path).resourceValues(
-            forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
         return VolumeSpace(
-            free: values?.volumeAvailableCapacityForImportantUsage.map { UInt64(max(0, $0)) },
+            free: free(important: values?.volumeAvailableCapacityForImportantUsage,
+                       available: values?.volumeAvailableCapacity),
             used: path == "/System/Volumes/Data" ? volumeUsedBytes(path) : nil
         )
+    }
+
+    /// Free space as Finder counts it. APFS adds purgeable space to the
+    /// important-usage figure; exFAT, FAT and NTFS answer it with 0, so
+    /// those fall back to the plain free count.
+    static func free(important: Int64?, available: Int?) -> UInt64? {
+        if let important, important > 0 { return UInt64(important) }
+        if let available { return UInt64(max(0, available)) }
+        return important.map { UInt64(max(0, $0)) }
+    }
+}
+
+/// A mounted volume the Scan menu offers.
+nonisolated struct ScanVolume: Sendable, Equatable, Identifiable {
+    let name: String
+    /// What scanning this volume reads.
+    let path: String
+    let isInternal: Bool
+    let total: UInt64
+    let free: UInt64
+    var used: UInt64 { total > free ? total - free : 0 }
+    var id: String { path }
+
+    static let bootDataPath = "/System/Volumes/Data"
+    /// Shown until the first enumeration finishes, or if it finds nothing.
+    static let bootFallback = ScanVolume(
+        name: "Macintosh HD", path: bootDataPath, isInternal: true, total: 0, free: 0)
+
+    /// One mount as plain values, so the menu's rules can be checked
+    /// without the mount existing.
+    struct Facts: Sendable {
+        var path: String
+        var name: String?
+        var isRootFileSystem = false
+        var isLocal = true
+        var isBrowsable = true
+        var isInternal: Bool?
+        var total: Int?
+        var available: Int?
+        var availableForImportantUsage: Int64?
+    }
+
+    init(name: String, path: String, isInternal: Bool, total: UInt64, free: UInt64) {
+        self.name = name; self.path = path; self.isInternal = isInternal
+        self.total = total; self.free = free
+    }
+
+    init?(_ facts: Facts) {
+        // Hidden mounts (VM, Preboot, Recovery, cryptexes, autofs) are
+        // system plumbing, not something to scan.
+        guard facts.isBrowsable else { return nil }
+        // Network shares are left out; Choose Folder... still reaches them.
+        // Each directory read is a server round trip, so the engine's
+        // parallel walk turns a large share into a long scan that loads the
+        // server, and a stalled share can hang the read entirely. The
+        // capacity a server reports may be a quota rather than its disk.
+        guard facts.isLocal else { return nil }
+        if facts.isRootFileSystem {
+            // `/` is the sealed system snapshot; the user's data is on the
+            // Data volume, which is what Macintosh HD scans everywhere else.
+            name = "Macintosh HD"
+            path = Self.bootDataPath
+            isInternal = true
+        } else {
+            name = facts.name ?? (facts.path as NSString).lastPathComponent
+            path = facts.path
+            isInternal = facts.isInternal ?? false
+        }
+        total = UInt64(max(0, facts.total ?? 0))
+        free = min(total, VolumeSpace.free(important: facts.availableForImportantUsage,
+                                           available: facts.available) ?? 0)
+    }
+
+    private static let keys: [URLResourceKey] = [
+        .volumeLocalizedNameKey, .volumeIsRootFileSystemKey, .volumeIsLocalKey,
+        .volumeIsBrowsableKey, .volumeIsInternalKey, .volumeTotalCapacityKey,
+        .volumeAvailableCapacityKey, .volumeAvailableCapacityForImportantUsageKey,
+    ]
+
+    /// Mounted local volumes, the boot volume first. Reads every mount's
+    /// metadata, so call it off the main thread.
+    static func mounted() -> [ScanVolume] {
+        let urls = FileManager.default.mountedVolumeURLs(
+            includingResourceValuesForKeys: keys, options: [.skipHiddenVolumes]) ?? []
+        let volumes = urls.compactMap { url -> ScanVolume? in
+            guard let v = try? url.resourceValues(forKeys: Set(keys)) else { return nil }
+            return ScanVolume(Facts(
+                path: url.path, name: v.volumeLocalizedName,
+                isRootFileSystem: v.volumeIsRootFileSystem ?? false,
+                // Unknown counts as remote and hidden: left out, not guessed in.
+                isLocal: v.volumeIsLocal ?? false, isBrowsable: v.volumeIsBrowsable ?? false,
+                isInternal: v.volumeIsInternal, total: v.volumeTotalCapacity,
+                available: v.volumeAvailableCapacity,
+                availableForImportantUsage: v.volumeAvailableCapacityForImportantUsage))
+        }
+        // Macintosh HD stays on the menu even if its mount could not be read.
+        let boot = volumes.first { $0.path == bootDataPath } ?? bootFallback
+        return [boot] + volumes.filter { $0.path != bootDataPath }.sorted {
+            $0.name.localizedStandardCompare($1.name) == .orderedAscending
+        }
     }
 }
 

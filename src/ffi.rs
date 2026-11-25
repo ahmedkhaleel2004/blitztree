@@ -7,7 +7,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 
-use crate::{cleanup, scan, Progress, Tree};
+use crate::{cleanup, ranking, scan, types::Breakdown, Progress, Tree};
 
 pub struct BzScan {
     progress: Arc<Progress>,
@@ -146,10 +146,10 @@ pub unsafe extern "C" fn bz_cleanup_nodes(h: *mut BzScan) -> *const u32 {
         .map_or(std::ptr::null(), |f| f.cleanup_nodes.as_ptr())
 }
 
-/// Label at a candidate-list index (not a tree node index), valid until bz_free.
-///
 /// # Safety
 /// `h` must be a live scan handle, with no concurrent mutation or free.
+///
+/// Label at a candidate-list index (not a tree node index), valid until bz_free.
 #[no_mangle]
 pub unsafe extern "C" fn bz_cleanup_description(h: *mut BzScan, index: u64) -> *const c_char {
     let h = unsafe { &*h };
@@ -157,6 +157,124 @@ pub unsafe extern "C" fn bz_cleanup_description(h: *mut BzScan, index: u64) -> *
         .as_ref()
         .and_then(|f| f.cleanup_descriptions.get(index as usize))
         .map_or(std::ptr::null(), |s| s.as_ptr())
+}
+
+pub struct BzLargest {
+    nodes: Vec<u32>,
+}
+
+/// The `limit` largest files of at least `min_bytes` allocated, as tree node
+/// indices (largest first). Selected from the scan in place; no tree copy.
+/// Returns NULL without a finished scan.
+///
+/// # Safety
+/// `h` must be null or a live scan handle with no concurrent mutation or free.
+#[no_mangle]
+pub unsafe extern "C" fn bz_largest_files(
+    h: *mut BzScan,
+    limit: u32,
+    min_bytes: u64,
+) -> *mut BzLargest {
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = unsafe { &*h };
+    let Some(flat) = h.flat.as_ref() else {
+        return std::ptr::null_mut();
+    };
+    let nodes = ranking::largest_files(&flat.tree, min_bytes, limit as usize)
+        .into_iter()
+        .map(|i| i as u32)
+        .collect();
+    Box::into_raw(Box::new(BzLargest { nodes }))
+}
+
+/// # Safety
+/// `l` must be null or a pointer returned by `bz_largest_files` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn bz_largest_count(l: *mut BzLargest) -> u32 {
+    if l.is_null() {
+        return 0;
+    }
+    unsafe { &*l }.nodes.len() as u32
+}
+
+/// Valid for `bz_largest_count(l)` elements until `bz_largest_free(l)`.
+///
+/// # Safety
+/// `l` must be null or a pointer returned by `bz_largest_files` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn bz_largest_nodes(l: *mut BzLargest) -> *const u32 {
+    if l.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { &*l }.nodes.as_ptr()
+}
+
+/// # Safety
+/// `l` must be null or a pointer returned by `bz_largest_files` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn bz_largest_free(l: *mut BzLargest) {
+    if !l.is_null() {
+        drop(unsafe { Box::from_raw(l) });
+    }
+}
+
+/// Bytes and file counts per extension under `root`. Null without a tree or
+/// for a node outside it.
+///
+/// # Safety
+/// `h` must be null or a live scan handle with no concurrent mutation or free.
+#[no_mangle]
+pub unsafe extern "C" fn bz_types(h: *mut BzScan, root: u32) -> *mut Breakdown {
+    if h.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = unsafe { &*h };
+    match h.flat.as_ref() {
+        Some(flat) if (root as usize) < flat.tree.len() => {
+            Box::into_raw(Box::new(flat.tree.types(root as usize)))
+        }
+        _ => std::ptr::null_mut(),
+    }
+}
+
+/// # Safety
+/// `t` must be null or a pointer returned by `bz_types` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn bz_types_count(t: *mut Breakdown) -> u32 {
+    if t.is_null() {
+        return 0;
+    }
+    unsafe { &*t }.len() as u32
+}
+
+macro_rules! types_getter {
+    ($name:ident, $field:ident, $ty:ty) => {
+        /// # Safety
+        /// `t` must be null or a pointer returned by `bz_types` and not yet freed.
+        #[no_mangle]
+        pub unsafe extern "C" fn $name(t: *mut Breakdown) -> *const $ty {
+            if t.is_null() {
+                return std::ptr::null();
+            }
+            unsafe { &*t }.$field.as_ptr()
+        }
+    };
+}
+
+types_getter!(bz_types_ext_off, ext_off, u32);
+types_getter!(bz_types_ext_blob, ext_blob, u8);
+types_getter!(bz_types_alloc, alloc, u64);
+types_getter!(bz_types_files, files, u64);
+
+/// # Safety
+/// `t` must be null or a pointer returned by `bz_types` and not yet freed.
+#[no_mangle]
+pub unsafe extern "C" fn bz_types_free(t: *mut Breakdown) {
+    if !t.is_null() {
+        drop(unsafe { Box::from_raw(t) });
+    }
 }
 
 #[no_mangle]
@@ -204,5 +322,78 @@ mod tests {
             }
             assert!(unsafe { bz_cleanup_description(h, expected.len() as u64) }.is_null());
         }
+    }
+
+    #[test]
+    fn bridge_lists_largest_files_like_the_library() {
+        let mut tree = Tree::with_root("/root");
+        tree.push("dir", 0, 1000, 1000, true);
+        tree.push("a.bin", 1, 300, 300, false);
+        tree.push("b.bin", 0, 700, 700, false);
+        tree.push("c.bin", 1, 5, 5, false);
+        tree.link_children();
+        let expected = ranking::largest_files(&tree, 10, 5);
+        let mut handle = BzScan {
+            progress: Arc::new(Progress::default()),
+            done: Arc::new(AtomicBool::new(true)),
+            result: Arc::new(std::sync::Mutex::new(None)),
+            flat: Some(Box::new(with_cleanup(tree))),
+        };
+        let h = &mut handle as *mut BzScan;
+        let l = unsafe { bz_largest_files(h, 5, 10) };
+        assert!(!l.is_null());
+        assert_eq!(unsafe { bz_largest_count(l) } as usize, expected.len());
+        let nodes = unsafe { std::slice::from_raw_parts(bz_largest_nodes(l), expected.len()) };
+        assert_eq!(nodes, [3, 2]);
+        assert_eq!(
+            nodes.iter().map(|&n| n as usize).collect::<Vec<_>>(),
+            expected
+        );
+        unsafe { bz_largest_free(l) };
+        assert!(unsafe { bz_largest_files(std::ptr::null_mut(), 5, 0) }.is_null());
+    }
+
+    #[test]
+    fn bridge_returns_the_type_breakdown_of_a_folder() {
+        let mut tree = Tree::with_root("/root");
+        let pics = tree.push("pics", 0, 0, 0, true);
+        tree.push("notes", 0, 3, 3, false);
+        tree.push("a.JPG", pics, 900, 900, false);
+        tree.push("b.png", pics, 100, 100, false);
+        crate::finish(&mut tree);
+
+        let mut handle = BzScan {
+            progress: Arc::new(Progress::default()),
+            done: Arc::new(AtomicBool::new(true)),
+            result: Arc::new(std::sync::Mutex::new(None)),
+            flat: Some(Box::new(with_cleanup(tree))),
+        };
+        let h = &mut handle as *mut BzScan;
+        let t = unsafe { bz_types(h, 0) };
+        assert!(!t.is_null());
+        let n = unsafe { bz_types_count(t) } as usize;
+        assert_eq!(n, 3);
+        let (off, alloc, files) = unsafe {
+            (
+                std::slice::from_raw_parts(bz_types_ext_off(t), n + 1),
+                std::slice::from_raw_parts(bz_types_alloc(t), n),
+                std::slice::from_raw_parts(bz_types_files(t), n),
+            )
+        };
+        let blob = unsafe { std::slice::from_raw_parts(bz_types_ext_blob(t), off[n] as usize) };
+        let exts: Vec<&[u8]> = (0..n)
+            .map(|i| &blob[off[i] as usize..off[i + 1] as usize])
+            .collect();
+        assert_eq!(exts, [&b"jpg"[..], b"png", b""]);
+        assert_eq!(alloc, [900, 100, 3]);
+        assert_eq!(files, [1, 1, 1]);
+        unsafe { bz_types_free(t) };
+
+        let t = unsafe { bz_types(h, pics) };
+        assert_eq!(unsafe { bz_types_count(t) }, 2);
+        unsafe { bz_types_free(t) };
+        assert!(unsafe { bz_types(h, 5) }.is_null());
+        assert!(unsafe { bz_types(std::ptr::null_mut(), 0) }.is_null());
+        assert_eq!(unsafe { bz_types_count(std::ptr::null_mut()) }, 0);
     }
 }
