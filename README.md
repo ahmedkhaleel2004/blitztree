@@ -83,8 +83,16 @@ panel and CLI share one Rust implementation of the rules, with no new heuristics
 Both report incomplete scans; allocated bytes are not
 a promise of reclaimable space. Neither command modifies the scanned files.
 
-The CLI is built from source separately from the app. Its JSON dependency is
-only compiled with the `cli` feature. See [the CLI contract and tests](docs/AGENT_API.md).
+The JSON dependency is compiled only with the `cli` feature. `./build.sh` builds
+that binary as `blitztree-engine` and the optional Swift front, and places both in
+`BlitzTree.app/Contents/MacOS/` (the engine is not named `blitztree` in the bundle because on a case-insensitive volume that name is the GUI executable).
+See [the CLI contract and tests](docs/AGENT_API.md).
+
+`cli-anything-blitztree` is an optional Swift front on that same engine for agents that
+expect command groups, `--json`, a session file and a REPL. It does not
+reimplement the scan, and with `--json` it does not re-encode a successful
+report. `zsh cli/build.sh` writes a development binary at `build/cli-anything-blitztree`.
+See [cli/README.md](cli/README.md).
 
 ## License
 
