@@ -22,9 +22,9 @@ else
   clang -O2 -mmacosx-version-min=14.0 -c benchmarks/ui_fixture.c -o "$UI_BENCH_TMP/fixture.o"
   UI_BENCH_INPUTS+=("$UI_BENCH_TMP/fixture.o")
 fi
-swiftc "$UI_BENCH_TMP/app/Agent.swift" "$UI_BENCH_TMP/app/Cleanup.swift" \
-  "$UI_BENCH_TMP/app/ContentView.swift" "$UI_BENCH_TMP/app/Model.swift" \
-  "$UI_BENCH_TMP/app/Treemap.swift" "$UI_BENCH_TMP/app/TreemapView.swift" "$UI_BENCH_TMP/app/SunburstView.swift" \
+UI_BENCH_SOURCES=("$UI_BENCH_TMP"/app/*.swift)
+UI_BENCH_SOURCES=(${UI_BENCH_SOURCES:#*/Main.swift})
+swiftc "${UI_BENCH_SOURCES[@]}" \
   "${UI_BENCH_INPUTS[@]}" benchmarks/UIReferenceCleanup.swift "${UI_BENCH_LINK[@]}" \
   -import-objc-header "$UI_BENCH_HEADER" \
   -O -parse-as-library -swift-version 6 -default-isolation MainActor \

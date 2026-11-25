@@ -2,8 +2,8 @@ import AppKit
 import SwiftUI
 import Observation
 
-/// A folder that is safe to delete because a tool rebuilds or re-downloads
-/// it on demand: package installs, build output, caches.
+/// A recognized build or cache folder. Eligibility is checked separately from
+/// recognition, then revalidated immediately before moving it.
 nonisolated struct CleanupItem: Identifiable, Sendable {
     let node: Int
     let path: String
@@ -11,21 +11,83 @@ nonisolated struct CleanupItem: Identifiable, Sendable {
     let kind: String
     let bytes: UInt64
     var id: Int { node }
+    let target: CleanupTarget?
+    let blocked: String?
+    /// The rule's verifier ("" none). Nil when the engine gave no answer,
+    /// which blocks: a missing answer never reads as "no check needed".
+    let verify: String?
+
+    init(node: Int, path: String, display: String, kind: String, bytes: UInt64,
+         root: String = NSHomeDirectory(), verify: String?, evidence: WorktreeEvidence? = nil) {
+        self.node = node; self.path = path; self.display = display
+        self.kind = kind; self.bytes = bytes; self.verify = verify
+        do {
+            self.target = try CleanupPathSafety.capture(
+                path: path, root: root,
+                check: CleanupCheck(verify: verify ?? CleanupVerify.unavailable, folder: path),
+                evidence: evidence)
+            self.blocked = nil
+        } catch let error as CleanupPathError {
+            self.target = nil
+            self.blocked = error.errorDescription ?? error.englishDescription
+        } catch {
+            self.target = nil
+            self.blocked = error.localizedDescription
+        }
+    }
+}
+
+extension Tree {
+    /// The check of the innermost folder the engine recognised at or around
+    /// `node` (`indexByNode` is `cleanupIndexByNode()`): a planned path inside
+    /// a recognised folder answers to that folder's check, run on that folder.
+    /// `.policyOnly` when no rule recognised the path or any folder above it, which
+    /// leaves only the path policy; a rule the engine gave no verifier answer
+    /// for blocks. `path` is `node`'s path in the spelling the caller will trash.
+    nonisolated func cleanupCheck(for node: Int, path: String, indexByNode: [Int: Int]) -> CleanupCheck {
+        let chain = ancestry(node)
+        guard let offset = chain.lastIndex(where: { indexByNode[$0] != nil }),
+              let index = indexByNode[chain[offset]] else { return .policyOnly }
+        let verify = cleanupVerify(index) ?? CleanupVerify.unavailable
+        guard !verify.isEmpty else { return .policyOnly }
+        var folder = path as NSString
+        for _ in 0..<(chain.count - 1 - offset) { folder = folder.deletingLastPathComponent as NSString }
+        return CleanupCheck(verify: verify, folder: folder as String)
+    }
+
+    /// The engine's candidate nodes, each with its index in the candidate list.
+    nonisolated func cleanupIndexByNode() -> [Int: Int] {
+        Dictionary((0..<cleanupCount).map { (Int(cleanupNodes[$0]), $0) }, uniquingKeysWith: { first, _ in first })
+    }
 }
 
 nonisolated enum Cleanup {
     /// The Rust engine selects candidates for both the panel and JSON CLI.
     /// Swift only supplies presentation paths; rules and labels live in cleanup.rs.
+    ///
+    /// One refresh: every worktree candidate is verified once, and the lsof and
+    /// the Codex log scan behind those verifications run once for all of them.
+    /// What this says is only what the panel offers; the move to the Trash
+    /// verifies again, fresh (`CleanupOperations.trash`).
     static func find(in tree: Tree) -> [CleanupItem] {
         let home = NSHomeDirectory()
+        let evidence = WorktreeEvidence()
         return (0..<tree.cleanupCount).map { index in
             let node = Int(tree.cleanupNodes[index])
             let path = tree.path(node)
             var display = tree.displayPath(node)
             if display.hasPrefix(home) { display = "~" + display.dropFirst(home.count) }
             return CleanupItem(node: node, path: path, display: display,
-                               kind: tree.cleanupDescription(index), bytes: tree.alloc[node])
+                               kind: tree.cleanupDescription(index), bytes: tree.alloc[node], root: tree.path(0),
+                               verify: tree.cleanupVerify(index), evidence: evidence)
         }
+    }
+
+    /// The listed items the user picked, by path, that can still be moved.
+    /// A pick whose folder left the list (trashed, or gone from a newer
+    /// scan) counts for nothing.
+    static func picked(_ paths: Set<String>, in items: [CleanupItem]) -> [CleanupItem] {
+        items.filter { paths.contains($0.path) && $0.target != nil }
     }
 }
 
@@ -40,25 +102,66 @@ final class CleanupTrashBatch {
 
     func clearFailures() { failures = [] }
 
+    /// Worktrees moved to the Trash whose admin entry is still to be removed
+    /// once the Trash is emptied (see `settleWorktrees`). Kept for the life of
+    /// the app only.
+    private var worktreesInTrash: [CleanupReceipt] = []
+    /// Admin entries that were left in place, with why; shown until dismissed.
+    private(set) var notices: [String] = []
+
+    func clearNotices() { notices = [] }
+
+    /// Takes over receipts of worktrees another flow left in the Trash.
+    func adopt(_ receipts: [CleanupReceipt]) {
+        for receipt in receipts where receipt.worktree != nil
+            && !worktreesInTrash.contains(where: { $0.url == receipt.url }) {
+            worktreesInTrash.append(receipt)
+        }
+    }
+
+    /// Removes the admin entry of every adopted worktree whose Trash copy has
+    /// been emptied since. Runs off the main thread and bounded by the Trash's
+    /// size; a worktree still in the Trash waits for the next call.
+    func settleWorktrees() async {
+        let waiting = worktreesInTrash
+        guard !waiting.isEmpty else { return }
+        worktreesInTrash = []
+        let settlement = await AgentLocator.onBackgroundThread { CleanupOperations.settleWorktrees(waiting) }
+        let adoptedMeanwhile = worktreesInTrash
+        worktreesInTrash = settlement.waiting
+        adopt(adoptedMeanwhile)
+        notices.append(contentsOf: settlement.notices)
+    }
+
     @discardableResult
-    func start(_ items: [CleanupItem], completion: @escaping ([String]) -> Void) -> Task<Void, Never>? {
+    func start(_ items: [CleanupItem], move: @escaping @Sendable (URL) throws -> URL = CleanupOperations.systemTrash,
+               completion: @escaping (_ moved: [CleanupItem], _ failed: [String]) -> Void) -> Task<Void, Never>? {
         guard !running else { return nil }
         running = true
         return Task {
-            let failed = await Task.detached(priority: .userInitiated) {
+            let (moved, failed, receipts) = await AgentLocator.onBackgroundThread {
+                var moved: [CleanupItem] = []
                 var failed: [String] = []
+                var receipts: [CleanupReceipt] = []
                 for item in items {
                     do {
-                        try FileManager.default.trashItem(at: URL(fileURLWithPath: item.path), resultingItemURL: nil)
+                        guard let target = item.target else {
+                            throw CleanupOperations.failure("This folder could not be validated; rescan before cleaning")
+                        }
+                        // Revalidating at the boundary checks the folder again
+                        // (it may have been used since the scan), rule check included.
+                        receipts.append(try CleanupOperations.trash(target, move: move))
+                        moved.append(item)
                     } catch {
                         failed.append("\(item.display): \(error.localizedDescription)")
                     }
                 }
-                return failed
-            }.value
+                return (moved, failed, receipts)
+            }
             failures.append(contentsOf: failed)
+            adopt(receipts)
             running = false
-            completion(failed)
+            completion(moved, failed)
         }
     }
 }
@@ -67,12 +170,12 @@ final class CleanupTrashBatch {
 /// agent cleanup is on screen, the whole panel is that run.
 struct CleanupPanel: View {
     let model: ScanModel
-    @State private var picked: Set<Int> = []
+    @State private var picked: Set<String> = []
     @State private var confirming = false
 
     private var agent: InstalledAgent? { model.preferredAgent }
 
-    private var pickedItems: [CleanupItem] { model.cleanup.filter { picked.contains($0.id) } }
+    private var pickedItems: [CleanupItem] { Cleanup.picked(picked, in: model.cleanup) }
     private var pickedBytes: UInt64 { pickedItems.reduce(0) { $0 + $1.bytes } }
     private var totalBytes: UInt64 { model.cleanup.reduce(0) { $0 + $1.bytes } }
 
@@ -80,6 +183,8 @@ struct CleanupPanel: View {
         Group {
             if let run = model.agentRun {
                 AgentRunView(run: run, model: model, retry: { model.startAgent(run.agent) }) {
+                    // Worktrees left in the Trash lose their admin entry when it is emptied.
+                    model.cleanupTrash.adopt(run.items.flatMap(\.trashed))
                     run.cancel()
                     withAnimation(.snappy) { model.agentRun = nil }
                 }
@@ -89,7 +194,7 @@ struct CleanupPanel: View {
                     .transition(.opacity)
             }
         }
-        .confirmationDialog(picked.count == 1 ? "Move 1 folder to the Trash?" : "Move \(picked.count) folders to the Trash?", isPresented: $confirming) {
+        .confirmationDialog(pickedItems.count == 1 ? "Move 1 folder to the Trash?" : "Move \(pickedItems.count) folders to the Trash?", isPresented: $confirming) {
             Button("Move to Trash (\(Fmt.size(pickedBytes)))", role: .destructive) { trashPicked() }
             Button("Cancel", role: .cancel) {}
         } message: {
@@ -114,14 +219,30 @@ struct CleanupPanel: View {
             }
             .padding(12)
 
+            if !model.cleanupTrash.notices.isEmpty {
+                HStack(alignment: .firstTextBaseline, spacing: 8) {
+                    Text(model.cleanupTrash.notices.joined(separator: "\n"))
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
+                    Spacer(minLength: 4)
+                    Button("Dismiss") { model.cleanupTrash.clearNotices() }
+                        .buttonStyle(.plain)
+                        .font(.caption)
+                }
+                .padding(.horizontal, 12)
+                .padding(.bottom, 8)
+            }
+
             List(model.cleanup) { item in
                 HStack(alignment: .top, spacing: 8) {
                     Toggle("", isOn: Binding(
-                        get: { picked.contains(item.id) },
-                        set: { on in if on { picked.insert(item.id) } else { picked.remove(item.id) } }
+                        get: { picked.contains(item.path) },
+                        set: { on in if on { picked.insert(item.path) } else { picked.remove(item.path) } }
                     ))
                     .labelsHidden()
                     .toggleStyle(.checkbox)
+                    .disabled(item.target == nil)
                     VStack(alignment: .leading, spacing: 1) {
                         Text(item.display)
                             .lineLimit(1)
@@ -129,6 +250,11 @@ struct CleanupPanel: View {
                         Text(item.kind)
                             .font(.caption)
                             .foregroundStyle(.secondary)
+                        if let blocked = item.blocked {
+                            Text(blocked)
+                                .font(.caption)
+                                .foregroundStyle(.orange)
+                        }
                     }
                     Spacer(minLength: 4)
                     Text(Fmt.size(item.bytes))
@@ -154,13 +280,13 @@ struct CleanupPanel: View {
                 Button {
                     confirming = true
                 } label: {
-                    Text(picked.isEmpty ? "Select folders to clean up"
-                         : "Move \(picked.count) to Trash · \(Fmt.size(pickedBytes))")
+                    Text(pickedItems.isEmpty ? "Select folders to clean up"
+                         : "Move \(pickedItems.count) to Trash · \(Fmt.size(pickedBytes))")
                         .frame(maxWidth: .infinity)
                 }
                 .buttonStyle(.bordered)
                 .controlSize(.large)
-                .disabled(picked.isEmpty || model.scanning || model.cleanupTrash.running)
+                .disabled(pickedItems.isEmpty || model.scanning || model.cleanupTrash.running)
             }
             .padding(12)
         }
@@ -242,7 +368,7 @@ struct CleanupPanel: View {
     }
 
     private func trashPicked() {
-        model.cleanupTrash.start(pickedItems) { _ in
+        model.cleanupTrash.start(pickedItems) { _, _ in
             picked = []
             // The batch clears its busy state before this final rescan.
             model.startScan()
@@ -569,6 +695,12 @@ private struct PlanCard: View {
                     }
                     .font(.caption2.monospaced())
                     .foregroundStyle(.tertiary)
+                }
+                ForEach(item.notices, id: \.self) { notice in
+                    Label(notice, systemImage: "info.circle")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                        .fixedSize(horizontal: false, vertical: true)
                 }
             }
         }

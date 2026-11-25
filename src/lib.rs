@@ -121,6 +121,42 @@ impl Tree {
         }
         path
     }
+    /// Path order matching `Tree::path`: case-exact per component so every
+    /// component matters, and an ancestor sorts before its descendants.
+    pub(crate) fn compare_paths(&self, mut a: usize, mut b: usize) -> std::cmp::Ordering {
+        if a == b {
+            return std::cmp::Ordering::Equal;
+        }
+        if self.parents[a] == self.parents[b] {
+            return self.name_bytes(a).cmp(self.name_bytes(b));
+        }
+        let depth = |mut i: usize| {
+            let mut depth = 0;
+            while i != 0 {
+                depth += 1;
+                i = self.parents[i] as usize;
+            }
+            depth
+        };
+        let (mut da, mut db) = (depth(a), depth(b));
+        let ancestor_order = da.cmp(&db);
+        while da > db {
+            a = self.parents[a] as usize;
+            da -= 1;
+        }
+        while db > da {
+            b = self.parents[b] as usize;
+            db -= 1;
+        }
+        if a == b {
+            return ancestor_order;
+        }
+        while self.parents[a] != self.parents[b] {
+            a = self.parents[a] as usize;
+            b = self.parents[b] as usize;
+        }
+        self.name_bytes(a).cmp(self.name_bytes(b))
+    }
     /// Path components from the root, compared as `str`s compare (bytewise).
     fn path_parts(&self, mut i: u32) -> Vec<&[u8]> {
         let mut parts = Vec::new();

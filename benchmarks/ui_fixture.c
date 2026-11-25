@@ -64,6 +64,20 @@ const uint32_t *bz_cleanup_nodes(BzScan *h) { return h->cleanup_nodes; }
 const char *bz_cleanup_description(BzScan *h, uint64_t index) {
     return index < h->cleanup_count ? h->cleanup_descriptions[index] : NULL;
 }
+// Synthetic candidates carry only a description: report them as one safe
+// build kind with no verifier, and out-of-range like the engine does.
+const char *bz_cleanup_kind_id(BzScan *h, uint64_t index) {
+    return index < h->cleanup_count ? "fixture" : NULL;
+}
+const char *bz_cleanup_section_id(BzScan *h, uint64_t index) {
+    return index < h->cleanup_count ? "build" : NULL;
+}
+uint8_t bz_cleanup_group(BzScan *h, uint64_t index) {
+    return index < h->cleanup_count ? 0 : 255;
+}
+const char *bz_cleanup_verify(BzScan *h, uint64_t index) {
+    return index < h->cleanup_count ? "" : NULL;
+}
 void bz_free(BzScan *h) {
     if (!h) return;
     for (uint32_t i = 0; i < h->cleanup_count; ++i) free(h->cleanup_descriptions[i]);

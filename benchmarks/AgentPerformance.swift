@@ -342,11 +342,11 @@ struct AgentPerformance {
         model.tree = tree
         model.agentEnv = AgentEnvironment(agents: [agent], loaded: true)
         let batch = model.cleanupTrash
-        var selected = (0..<10).map { CleanupItem(node: $0, path: "/offline/\($0)", display: "item-\($0)", kind: "fixture", bytes: 1) }
+        var selected = (0..<10).map { CleanupItem(node: $0, path: "/offline/\($0)", display: "item-\($0)", kind: "fixture", bytes: 1, verify: "") }
         var completions = 0
         var failures: [String] = []
         AgentBenchmarkGate.shared.arm()
-        let trashTask = batch.start(selected) { result in
+        let trashTask = batch.start(selected) { _, result in
             check(!batch.running, "Busy flag stayed set during rescan callback")
             failures = result
             completions += 1 // Stands in for the panel's one rescan callback.
@@ -355,7 +355,7 @@ struct AgentPerformance {
         check(batch.running, "Busy state was not set synchronously")
         model.openPanelAfterLaunchScan()
         check(model.panelRequests == 0, "Launch panel opened while trash was busy")
-        check(batch.start(selected) { _ in completions += 1 } == nil, "Busy batch accepted duplicate work")
+        check(batch.start(selected) { _, _ in completions += 1 } == nil, "Busy batch accepted duplicate work")
         for _ in 0..<1000 {
             if AgentBenchmarkGate.shared.hasEntered { break }
             try? await Task.sleep(for: .milliseconds(1))
@@ -373,7 +373,7 @@ struct AgentPerformance {
         await Task.yield()
         let retainedFailures = ["item-2: injected failure", "item-7: injected failure"]
         check(model.cleanupTrash.failures == retainedFailures, "Closing the panel lost cleanup failures")
-        let successfulTask = batch.start([CleanupItem(node: 10, path: "/offline/10", display: "item-10", kind: "fixture", bytes: 1)]) { result in
+        let successfulTask = batch.start([CleanupItem(node: 10, path: "/offline/10", display: "item-10", kind: "fixture", bytes: 1, verify: "")]) { _, result in
             check(result.isEmpty, "A successful batch inherited an earlier batch's callback failures")
         }!
         await successfulTask.value

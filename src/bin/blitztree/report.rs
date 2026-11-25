@@ -75,23 +75,31 @@ pub fn inventory(scan: &Tree, options: &Options) -> Value {
 }
 
 pub fn quick_wins(scan: &Tree, options: &Options) -> Value {
-    let candidates = cleanup::find(scan, options.min_bytes);
-    let candidate_allocated_bytes: u64 = candidates
+    let anchors = cleanup::Anchors::from_env();
+    let candidates = cleanup::find(scan, options.min_bytes, &anchors);
+    // Container kinds (git_worktree) are listed and descended, so a candidate
+    // can sit inside another: totals count each byte once (outermost only).
+    let enclosing = cleanup::enclosing(scan, &candidates);
+    let shown = options.limit.min(candidates.len());
+    let outermost_bytes = |within: usize| -> u64 {
+        (0..within)
+            .filter(|&k| enclosing[k].is_none_or(|e| e >= within))
+            .map(|k| scan.alloc[candidates[k].node as usize])
+            .sum()
+    };
+    let candidate_allocated_bytes = outermost_bytes(candidates.len());
+    let displayed_allocated_bytes = outermost_bytes(shown);
+    let displayed: Vec<Value> = candidates[..shown]
         .iter()
-        .map(|c| scan.alloc[c.node as usize])
-        .sum();
-    let displayed_allocated_bytes: u64 = candidates
-        .iter()
-        .take(options.limit)
-        .map(|c| scan.alloc[c.node as usize])
-        .sum();
-    let displayed: Vec<Value> = candidates
-        .iter()
-        .take(options.limit)
-        .map(|c| {
+        .zip(&enclosing)
+        .map(|(c, outer)| {
             let mut value = entry(scan, c.node as usize);
             value["category"] = json!(c.kind.id());
             value["reason"] = json!(c.kind.description());
+            value["group"] = json!(c.kind.group().id());
+            value["section"] = json!(c.kind.section().id());
+            value["verify"] = json!(c.kind.verify());
+            value["contained_in"] = json!(outer.map(|e| scan.path(candidates[e].node as usize)));
             value["requires_review"] = json!(true);
             value
         })
@@ -102,9 +110,9 @@ pub fn quick_wins(scan: &Tree, options: &Options) -> Value {
         "candidate_allocated_bytes": candidate_allocated_bytes,
         "displayed_allocated_bytes": displayed_allocated_bytes,
         "inventory": inventory(scan, options),
-        "scope": "The same folder recognition as the Clean Up panel, within the requested scan root. The root itself is not a candidate.",
+        "scope": "The same folder recognition as the Clean Up panel, within the requested scan root. The root itself is not a candidate. Home rules (~/.cache, ~/Library/Caches, ~/.cargo, ...) are anchored to $HOME.",
         "sort": "allocated_bytes descending, path ascending",
         "reclaimable_bytes": Value::Null,
-        "note": "These are the Clean Up panel's name/structure heuristics, not a safety assessment. They do not check project activity, ownership, local edits or reproducibility. Review each path and stop the owning app/tool before considering removal. Incomplete candidates have partial sizes. Allocated bytes are footprint, not guaranteed recoverable space; hard links, APFS clones/snapshots and open files affect recovery. Moving to Trash alone does not free space. No action is authorized by this report."
+        "note": "These are the Clean Up panel's name/structure heuristics, not a safety assessment. Markers are matched by name only; this CLI never reads file contents. A non-null `verify` names a check the panel performs before acting and this report did not: cachedir_tag (CACHEDIR.TAG signature), git_worktree (clean, unlocked linked worktree not in use), recent_activity (nothing modified in the last 2 days) or agent_session (CACHEDIR.TAG signature, and the owning Claude Code session is not running). Without verify, project activity, ownership, local edits and reproducibility are still unchecked. A git_worktree candidate can contain other candidates (`contained_in`); totals count those bytes once. Review each path and stop the owning app/tool before considering removal. Incomplete candidates have partial sizes. Allocated bytes are footprint, not guaranteed recoverable space; hard links, APFS clones/snapshots and open files affect recovery. Moving to Trash alone does not free space. No action is authorized by this report."
     })
 }
