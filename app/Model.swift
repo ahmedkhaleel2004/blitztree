@@ -248,6 +248,8 @@ final class ScanModel {
     let cleanupTrash = CleanupTrashBatch()
     /// Volume-used minus what the scan could see: root-only territory.
     var unscannedBytes: UInt64 = 0
+    /// What the scan counted beyond the volume's used space.
+    var overcountedBytes: UInt64 = 0
     var showFreeSpace: Bool = UserDefaults.standard.bool(forKey: "bz.showFree") {
         didSet { UserDefaults.standard.set(showFreeSpace, forKey: "bz.showFree") }
     }
@@ -270,6 +272,9 @@ final class ScanModel {
         selection = nil
         hovered = nil
         files = 0; dirs = 0; bytes = 0; elapsed = 0
+        freeBytes = 0
+        unscannedBytes = 0
+        overcountedBytes = 0
         lastPollAt = nil; maxPollGap = 0
         scanning = true
         startedAt = Date()
@@ -357,10 +362,16 @@ final class ScanModel {
         // says it holds. The difference is root-only space (Spotlight
         // index, unified logs, …) no unelevated app can read.
         unscannedBytes = 0
+        overcountedBytes = 0
         if let tree, let used = space.used {
             let seen = tree.alloc[0]
             if used > seen {
                 unscannedBytes = used - seen
+            } else {
+                // More than the volume holds: data shared between paths that
+                // the engine could not attribute once (clones edited after
+                // copying).
+                overcountedBytes = seen - used
             }
         }
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
@@ -368,17 +379,27 @@ final class ScanModel {
     }
 }
 
-nonisolated private struct VolumeSpace: Sendable {
+nonisolated struct VolumeSpace: Sendable {
     let free: UInt64?
     let used: UInt64?
 
     static func read(_ path: String) -> VolumeSpace {
         let values = try? URL(fileURLWithPath: path).resourceValues(
-            forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            forKeys: [.volumeAvailableCapacityForImportantUsageKey, .volumeAvailableCapacityKey])
         return VolumeSpace(
-            free: values?.volumeAvailableCapacityForImportantUsage.map { UInt64(max(0, $0)) },
+            free: free(important: values?.volumeAvailableCapacityForImportantUsage,
+                       available: values?.volumeAvailableCapacity),
             used: path == "/System/Volumes/Data" ? volumeUsedBytes(path) : nil
         )
+    }
+
+    /// Free space as Finder counts it. APFS adds purgeable space to the
+    /// important-usage figure; exFAT, FAT and NTFS answer it with 0, so
+    /// those fall back to the plain free count.
+    static func free(important: Int64?, available: Int?) -> UInt64? {
+        if let important, important > 0 { return UInt64(important) }
+        if let available { return UInt64(max(0, available)) }
+        return important.map { UInt64(max(0, $0)) }
     }
 }
 

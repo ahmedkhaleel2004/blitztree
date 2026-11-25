@@ -187,7 +187,9 @@ fn run() -> Result<Value, (i32, String)> {
             "entry_errors": progress.entry_errors.load(Ordering::Relaxed),
             "invalid_names": progress.invalid_names.load(Ordering::Relaxed),
             "skipped_cloud_directories": cloud, "skipped_mount_points": mounts,
-            "policy": "Metadata only. One volume; directory symlinks and cloud-only directories are not traversed. Filesystem changes during a scan can affect results."},
+            "shared_allocated_bytes": progress.shared_bytes.load(Ordering::Relaxed),
+            "clone_ids_unavailable_directories": progress.clone_ids_unavailable_dirs.load(Ordering::Relaxed),
+            "policy": "Metadata only. One volume; directory symlinks and cloud-only directories are not traversed. Hard links and whole APFS clones count once, under their first path; shared_allocated_bytes is what they would have added again. Clones edited after copying still count in full. Filesystem changes during a scan can affect results."},
         "report": report,
     }))
 }
