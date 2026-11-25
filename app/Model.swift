@@ -73,6 +73,28 @@ nonisolated final class Tree: @unchecked Sendable {
         return UnsafeBufferPointer(start: childArr + start, count: end - start)
     }
 
+    /// Search all nodes matching `query` (substring or wildcards with * and ?),
+    /// returning the total match count and up to `limit` node indices sorted largest first.
+    func search(query: String, limit: Int = 1000) -> (total: UInt64, nodes: [Int]) {
+        let decomposed = query.decomposedStringWithCanonicalMapping
+        guard let s = decomposed.cString(using: .utf8),
+              let search = bz_search(handle, s, UInt32(limit)) else {
+            return (0, [])
+        }
+        defer { bz_search_free(search) }
+        let total = bz_search_total_matches(search)
+        let count = Int(bz_search_result_count(search))
+        guard count > 0, let ptr = bz_search_result_nodes(search) else {
+            return (total, [])
+        }
+        var nodes = [Int]()
+        nodes.reserveCapacity(count)
+        for i in 0..<count {
+            nodes.append(Int(ptr[i]))
+        }
+        return (total, nodes)
+    }
+
     /// Human-facing path: the Data-volume firmlink prefix reads as "/".
     func displayPath(_ i: Int) -> String {
         let p = path(i)
@@ -255,6 +277,39 @@ final class ScanModel {
         didSet { UserDefaults.standard.set(mapStyle.rawValue, forKey: "bz.mapStyle") }
     }
 
+    // MARK: search
+    var searchQuery: String = "" {
+        didSet {
+            performSearch()
+        }
+    }
+    var searchResults: [Int] = []
+    var searchTotalMatches: UInt64 = 0
+    var isSearching: Bool = false
+    private var searchTask: Task<Void, Never>?
+
+    func performSearch() {
+        searchTask?.cancel()
+        let q = searchQuery.trimmingCharacters(in: .whitespaces)
+        guard !q.isEmpty, let tree else {
+            searchResults = []
+            searchTotalMatches = 0
+            isSearching = false
+            return
+        }
+        isSearching = true
+        searchTask = Task.detached(priority: .userInitiated) { [tree, q] in
+            let (total, nodes) = tree.search(query: q, limit: 1000)
+            if Task.isCancelled { return }
+            await MainActor.run { [weak self] in
+                guard let self, self.searchQuery.trimmingCharacters(in: .whitespaces) == q, self.tree === tree else { return }
+                self.searchResults = nodes
+                self.searchTotalMatches = total
+                self.isSearching = false
+            }
+        }
+    }
+
     private var handle: OpaquePointer?
     private var timer: Timer?
     private var startedAt: Date?
@@ -266,6 +321,10 @@ final class ScanModel {
         if let path { scanRoot = path }
         tree = nil
         cleanup = []
+        searchTask?.cancel()
+        searchResults = []
+        searchTotalMatches = 0
+        isSearching = false
         viewRoot = 0
         selection = nil
         hovered = nil
@@ -349,6 +408,9 @@ final class ScanModel {
                 guard self.tree === tree else { return }
                 cleanup = found
                 openPanelAfterLaunchScan()
+            }
+            if !searchQuery.trimmingCharacters(in: .whitespaces).isEmpty {
+                performSearch()
             }
             NSLog("BZ scan done: %llu nodes, %llu unreadable dirs", UInt64(tree.count), tree.errors)
         }

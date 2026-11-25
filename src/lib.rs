@@ -6,7 +6,8 @@
 
 pub mod cleanup;
 pub mod ffi;
-pub mod searchfs;
+pub mod ranking;
+pub mod search;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
@@ -102,7 +103,7 @@ impl Tree {
     pub fn kids(&self, i: usize) -> &[u32] {
         &self.children[self.child_off[i] as usize..self.child_off[i + 1] as usize]
     }
-    fn name_bytes(&self, i: usize) -> &[u8] {
+    pub(crate) fn name_bytes(&self, i: usize) -> &[u8] {
         &self.name_blob[self.name_off[i] as usize..self.name_off[i + 1] as usize]
     }
     /// Names are validated UTF-8 when scanned.

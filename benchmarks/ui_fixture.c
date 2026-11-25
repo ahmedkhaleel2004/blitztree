@@ -49,6 +49,12 @@ const uint32_t *bz_children(BzScan *h) { return h->children; }
 const uint32_t *bz_name_off(BzScan *h) { return h->name_off; }
 const uint8_t *bz_name_blob(BzScan *h) { return h->name_blob; }
 uint64_t bz_errors(BzScan *h) { (void)h; return 0; }
+// No benchmark searches; the fixture has no index to search.
+BzSearch *bz_search(BzScan *h, const char *query, uint32_t limit) { (void)h; (void)query; (void)limit; abort(); }
+uint64_t bz_search_total_matches(BzSearch *s) { (void)s; abort(); }
+uint32_t bz_search_result_count(BzSearch *s) { (void)s; abort(); }
+const uint32_t *bz_search_result_nodes(BzSearch *s) { (void)s; abort(); }
+void bz_search_free(BzSearch *s) { (void)s; }
 void bz_fixture_add_cleanup(BzScan *h, uint32_t node, const char *description) {
     uint32_t n = h->cleanup_count;
     h->cleanup_nodes = realloc(h->cleanup_nodes, (n + 1) * sizeof(*h->cleanup_nodes));

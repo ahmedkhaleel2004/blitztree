@@ -172,6 +172,79 @@ pub extern "C" fn bz_free(h: *mut BzScan) {
     }
 }
 
+pub struct BzSearch {
+    total_matches: u64,
+    nodes: Vec<u32>,
+}
+
+/// Interactive search over all nodes in the tree.
+/// Returns NULL if `h` or `query` is NULL, `query` is not UTF-8, or no tree
+/// has been taken yet.
+///
+/// # Safety
+/// `h` must be NULL or a live scan handle; `query` must be NULL or a
+/// NUL-terminated C string.
+#[no_mangle]
+pub unsafe extern "C" fn bz_search(h: *mut BzScan, query: *const c_char, limit: u32) -> *mut BzSearch {
+    if h.is_null() || query.is_null() {
+        return std::ptr::null_mut();
+    }
+    let h = unsafe { &*h };
+    let Some(flat) = h.flat.as_ref() else {
+        return std::ptr::null_mut();
+    };
+    let query_str = unsafe {
+        match CStr::from_ptr(query).to_str() {
+            Ok(s) => s,
+            Err(_) => return std::ptr::null_mut(),
+        }
+    };
+    let (total_matches, nodes) = flat.tree.search(query_str, limit as usize);
+    Box::into_raw(Box::new(BzSearch {
+        total_matches,
+        nodes,
+    }))
+}
+
+/// # Safety
+/// `s` must be NULL or a live `BzSearch` returned by `bz_search`.
+#[no_mangle]
+pub unsafe extern "C" fn bz_search_total_matches(s: *mut BzSearch) -> u64 {
+    if s.is_null() {
+        return 0;
+    }
+    unsafe { &*s }.total_matches
+}
+
+/// # Safety
+/// `s` must be NULL or a live `BzSearch` returned by `bz_search`.
+#[no_mangle]
+pub unsafe extern "C" fn bz_search_result_count(s: *mut BzSearch) -> u32 {
+    if s.is_null() {
+        return 0;
+    }
+    unsafe { &*s }.nodes.len() as u32
+}
+
+/// # Safety
+/// `s` must be NULL or a live `BzSearch` returned by `bz_search`.
+#[no_mangle]
+pub unsafe extern "C" fn bz_search_result_nodes(s: *mut BzSearch) -> *const u32 {
+    if s.is_null() {
+        return std::ptr::null();
+    }
+    unsafe { &*s }.nodes.as_ptr()
+}
+
+/// # Safety
+/// `s` must be NULL or a live `BzSearch` not freed before.
+#[no_mangle]
+pub unsafe extern "C" fn bz_search_free(s: *mut BzSearch) {
+    if !s.is_null() {
+        drop(unsafe { Box::from_raw(s) });
+    }
+}
+
 
 #[cfg(test)]
 mod tests {

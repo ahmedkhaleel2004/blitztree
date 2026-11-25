@@ -7,6 +7,8 @@
 //!                        an order-independent digest of every (path, sizes, kind)
 //!   BZ_DUMP=<file> (digest) also writes the sorted rows, for diffing.
 //!   BZ_INCOMPLETE=<file> (bulk) writes the sorted paths of incomplete subtrees.
+//!          search      - scan path, then benchmark interactive query matching
+//!          search-synth- benchmark matching over synthetic 3.6M-entry disk scan
 //!          naive       - serial read_dir + per-file lstat (Disk Inventory X style)
 //!          naive-par   - parallel read_dir + per-file lstat
 //!   BZ_TOP=1 also prints each top-level entry's allocated bytes (for diffing).
@@ -115,21 +117,114 @@ fn main() {
                 progress.errors.load(Ordering::Relaxed),
             )
         }
-        "searchfs" => {
+        "search" => {
             let progress = Progress::default();
-            match blitztree::searchfs::catalog_dump(&path, &progress) {
-                Ok(entries) => {
-                    let e = entries.len();
-                    eprintln!("  ({e} catalog entries)");
+            let tree = scan(&path, &progress);
+            let query = std::env::var("BZ_QUERY").unwrap_or_else(|_| "photo".to_string());
+            let runs = 5;
+            let mut min_dt = std::time::Duration::MAX;
+            let mut total_matches = 0;
+            let mut result_count = 0;
+            for _ in 0..runs {
+                let t0 = Instant::now();
+                let (total, results) = tree.search(&query, 1000);
+                let dt = t0.elapsed();
+                if dt < min_dt {
+                    min_dt = dt;
                 }
-                Err(err) => eprintln!("  searchfs failed: {err}"),
+                total_matches = total;
+                result_count = results.len();
             }
-            (
-                progress.files.load(Ordering::Relaxed),
-                progress.dirs.load(Ordering::Relaxed),
-                progress.bytes.load(Ordering::Relaxed),
-                progress.errors.load(Ordering::Relaxed),
-            )
+            let entries = tree.len();
+            let eps = entries as f64 / min_dt.as_secs_f64();
+            if std::env::var_os("BZ_JSON").is_some() {
+                println!(
+                    "{{\"mode\":\"search\",\"query\":\"{query}\",\"entries\":{entries},\"matches\":{total_matches},\"returned\":{result_count},\"min_seconds\":{:.9},\"entries_per_sec\":{:.0}}}",
+                    min_dt.as_secs_f64(),
+                    eps
+                );
+                return;
+            }
+            println!(
+                "search '{}' on {} entries: {:.3} ms (min of {runs}) -> {total_matches} matches (top {result_count} returned)  {:.0} entries/s",
+                query,
+                entries,
+                min_dt.as_secs_f64() * 1000.0,
+                eps
+            );
+            return;
+        }
+        "search-synth" => {
+            let n: usize = std::env::var("BZ_SYNTH_COUNT")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(3_600_000);
+            let ties = std::env::var_os("BZ_SYNTH_TIES").is_some();
+            println!("Building synthetic tree with {n} entries...");
+            let mut tree = blitztree::Tree::default();
+            tree.parents.reserve(n);
+            tree.alloc.reserve(n);
+            tree.logical.reserve(n);
+            tree.flags.reserve(n);
+            tree.complete.reserve(n);
+            tree.name_off.reserve(n + 1);
+            tree.name_blob.reserve(n * 20);
+
+            tree.parents.push(blitztree::NO_PARENT);
+            tree.alloc.push(100_000_000_000);
+            tree.logical.push(100_000_000_000);
+            tree.flags.push(1);
+            tree.complete.push(true);
+            tree.name_off.push(0);
+            let root_name = b"/System/Volumes/Data";
+            tree.name_blob.extend_from_slice(root_name);
+            tree.name_off.push(tree.name_blob.len() as u32);
+
+            let extensions = ["png", "jpg", "pdf", "rs", "swift", "txt", "dylib", "json", "log", "münchen", "東京"];
+            for i in 1..n {
+                let ext = extensions[i % extensions.len()];
+                let name = format!("entry_{i:07}_{}.{}", if i % 10 == 0 { "photo" } else { "file" }, ext);
+                tree.parents.push(0);
+                let bytes = if ties { 4096 } else { (i as u64 * 1024) % 1_000_000_000 };
+                tree.alloc.push(bytes);
+                tree.logical.push(bytes);
+                tree.flags.push(if i % 8 == 0 { 1 } else { 0 });
+                tree.complete.push(true);
+                tree.name_blob.extend_from_slice(name.as_bytes());
+                tree.name_off.push(tree.name_blob.len() as u32);
+            }
+
+            println!("Synthetic tree ready. Benchmarking search queries (min of 5 runs each):");
+            let test_queries = [
+                "photo",
+                "*.png",
+                "entry_123*",
+                "*.東京",
+                "*münchen*",
+                "no_such_match_xyz_123",
+            ];
+            for query in test_queries {
+                let mut min_dt = std::time::Duration::MAX;
+                let mut total_matches = 0;
+                let mut result_count = 0;
+                for _ in 0..5 {
+                    let t0 = Instant::now();
+                    let (total, results) = tree.search(query, 1000);
+                    let dt = t0.elapsed();
+                    if dt < min_dt {
+                        min_dt = dt;
+                    }
+                    total_matches = total;
+                    result_count = results.len();
+                }
+                let eps = n as f64 / min_dt.as_secs_f64();
+                println!(
+                    "  {query:<25} {:>7.3} ms  {total_matches:>9} matches (top {result_count:<4})  {:>10.0} entries/s",
+                    min_dt.as_secs_f64() * 1000.0,
+                    eps
+                );
+            }
+            return;
         }
         "naive" => {
             let mut c = Counts::default();

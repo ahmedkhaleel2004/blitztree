@@ -5,6 +5,7 @@ import AppKit
 struct ContentView: View {
     @State private var model = ScanModel()
     @State private var showTable = true
+    @FocusState private var isSearchFocused: Bool
     @AppStorage("bz.showCleanup") private var showCleanup = false
     @AppStorage("bz.listWidth") private var listWidth = 390.0
 
@@ -79,6 +80,14 @@ struct ContentView: View {
             } else {
                 needsFDA = true
             }
+        }
+        .background {
+            Button("") {
+                isSearchFocused = true
+            }
+            .keyboardShortcut("f", modifiers: .command)
+            .opacity(0)
+            .allowsHitTesting(false)
         }
     }
 
@@ -169,6 +178,14 @@ struct ContentView: View {
             }
             .pickerStyle(.segmented)
             .help("Treemap (WizTree-style) or rings (DaisyDisk-style)")
+        }
+
+        if #available(macOS 26, *) {
+            ToolbarSpacer(.fixed, placement: .automatic)
+        }
+
+        ToolbarItem(placement: .automatic) {
+            SearchToolbarField(model: model, showTable: $showTable, isFocused: $isSearchFocused)
         }
 
         if #available(macOS 26, *) {
@@ -702,5 +719,210 @@ private extension View {
         } else {
             navigationTitle("")
         }
+    }
+}
+
+// MARK: search toolbar & results
+
+struct SearchToolbarField: View {
+    @Bindable var model: ScanModel
+    @Binding var showTable: Bool
+    @FocusState.Binding var isFocused: Bool
+    @State private var isPopoverPresented: Bool = false
+
+    var body: some View {
+        HStack(spacing: 5) {
+            Image(systemName: "magnifyingglass")
+                .foregroundStyle(.secondary)
+                .font(.system(size: 11))
+
+            TextField("Search", text: $model.searchQuery)
+                .textFieldStyle(.plain)
+                .focused($isFocused)
+                .frame(width: 140)
+                .onSubmit(submitSearch)
+
+            if !model.searchQuery.isEmpty {
+                Button(action: clearSearch) {
+                    Image(systemName: "xmark.circle.fill")
+                        .foregroundStyle(.secondary)
+                        .font(.system(size: 11))
+                }
+                .buttonStyle(.plain)
+            }
+
+            if model.isSearching {
+                ProgressView()
+                    .controlSize(.mini)
+            }
+        }
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(Color(nsColor: .controlBackgroundColor))
+        }
+        .overlay {
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .stroke(isFocused ? Color.accentColor : Color(nsColor: .separatorColor), lineWidth: 1)
+        }
+        .disabled(model.tree == nil)
+        .help("Filter by name (*, ? wildcards, ⌘F)")
+        .onChange(of: isFocused) {
+            if isFocused && !model.searchQuery.trimmingCharacters(in: .whitespaces).isEmpty && model.tree != nil {
+                isPopoverPresented = true
+            }
+        }
+        .onChange(of: model.searchQuery) {
+            let trimmed = model.searchQuery.trimmingCharacters(in: .whitespaces)
+            isPopoverPresented = !trimmed.isEmpty && model.tree != nil
+        }
+        .popover(isPresented: $isPopoverPresented, arrowEdge: .bottom) {
+            SearchResultsPopover(model: model, showTable: $showTable, isPresented: $isPopoverPresented)
+        }
+    }
+
+    private func submitSearch() {
+        if let first = model.searchResults.first {
+            showTable = true
+            model.reveal(first)
+        }
+    }
+
+    private func clearSearch() {
+        model.searchQuery = ""
+        isPopoverPresented = false
+    }
+}
+
+struct SearchResultsPopover: View {
+    let model: ScanModel
+    @Binding var showTable: Bool
+    @Binding var isPresented: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            header
+            Divider()
+            if let tree = model.tree {
+                if model.searchResults.isEmpty {
+                    VStack(spacing: 8) {
+                        Spacer()
+                        if model.isSearching {
+                            ProgressView()
+                            Text("Searching…")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        } else {
+                            Image(systemName: "magnifyingglass")
+                                .font(.system(size: 24))
+                                .foregroundStyle(.tertiary)
+                            Text("No matching files or folders")
+                                .font(.callout)
+                                .foregroundStyle(.secondary)
+                        }
+                        Spacer()
+                    }
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    .padding()
+                } else {
+                    ScrollView {
+                        LazyVStack(spacing: 2) {
+                            ForEach(model.searchResults, id: \.self) { node in
+                                SearchResultRow(
+                                    tree: tree,
+                                    node: node,
+                                    isSelected: model.selection == node
+                                ) {
+                                    showTable = true
+                                    model.reveal(node)
+                                }
+                            }
+                        }
+                        .padding(.vertical, 4)
+                        .padding(.horizontal, 6)
+                    }
+                }
+            }
+        }
+        .frame(width: 440, height: 380)
+    }
+
+    private var headerText: String {
+        if model.searchResults.isEmpty {
+            return "No matches"
+        }
+        let shown = Fmt.num(UInt64(model.searchResults.count))
+        let total = Fmt.num(model.searchTotalMatches)
+        if model.searchResults.count < Int(model.searchTotalMatches) {
+            return "Showing \(shown) of \(total) matches"
+        } else {
+            return "\(total) matches"
+        }
+    }
+
+    private var header: some View {
+        HStack {
+            Text(headerText)
+                .font(.caption.weight(.semibold))
+                .foregroundStyle(.secondary)
+            Spacer()
+            Text("Largest first")
+                .font(.caption)
+                .foregroundStyle(.tertiary)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 8)
+        .background(Color(nsColor: .windowBackgroundColor))
+    }
+}
+
+struct SearchResultRow: View {
+    let tree: Tree
+    let node: Int
+    let isSelected: Bool
+    let onSelect: () -> Void
+
+    var body: some View {
+        Button(action: onSelect) {
+            HStack(spacing: 8) {
+                Image(systemName: tree.isDir(node) ? "folder.fill" : "doc")
+                    .foregroundStyle(tree.isDir(node) ? Color.accentColor : Color.secondary)
+                    .font(.system(size: 14))
+                    .frame(width: 18)
+
+                VStack(alignment: .leading, spacing: 2) {
+                    HStack(spacing: 6) {
+                        Text(tree.name(node))
+                            .font(.system(size: 13, weight: .medium))
+                            .lineLimit(1)
+                            .foregroundStyle(isSelected ? Color.white : Color.primary)
+                        Spacer()
+                        Text(Fmt.size(tree.alloc[node]))
+                            .font(.system(size: 12, weight: .regular, design: .monospaced))
+                            .foregroundStyle(isSelected ? Color.white.opacity(0.85) : Color.secondary)
+                    }
+                    Text(tree.displayPath(node))
+                        .font(.system(size: 11))
+                        .foregroundStyle(isSelected ? Color.white.opacity(0.7) : Color.secondary.opacity(0.7))
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 6)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .background {
+                if isSelected {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.accentColor)
+                } else {
+                    RoundedRectangle(cornerRadius: 6, style: .continuous)
+                        .fill(Color.clear)
+                }
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
