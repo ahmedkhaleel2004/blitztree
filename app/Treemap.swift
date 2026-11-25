@@ -177,25 +177,36 @@ nonisolated enum TypeColor {
         return (Double(c.redComponent), Double(c.greenComponent), Double(c.blueComponent))
     }
 
-    static let fixed: [String: RGB] = {
-        var m: [String: RGB] = [:]
-        let groups: [([String], RGB)] = [
-            (["mp4", "mov", "mkv", "avi", "webm", "m4v"], hsb(0.055, 0.78, 0.98)), // video: orange
-            (["jpg", "jpeg", "png", "heic", "gif", "webp", "tiff", "raw", "svg", "icns"], hsb(0.80, 0.55, 0.96)), // images: purple
-            (["mp3", "m4a", "aac", "wav", "flac", "aiff"], hsb(0.34, 0.65, 0.88)), // audio: green
-            (["zip", "tar", "gz", "xz", "7z", "rar", "dmg", "pkg", "ipa", "xip"], hsb(0.125, 0.72, 0.97)), // archives: amber
-            (["dylib", "so", "framework", "bin", "exe", "o", "a", "metallib"], hsb(0.60, 0.62, 0.96)), // binaries: blue
-            (["swift", "rs", "c", "h", "cpp", "m", "py", "js", "ts", "tsx", "jsx", "go", "java", "rb", "sh", "json", "yaml", "toml"], hsb(0.47, 0.60, 0.86)), // code: teal
-            (["pdf", "doc", "docx", "txt", "md", "pages", "key", "ppt", "pptx", "xls", "xlsx", "csv"], hsb(0.57, 0.40, 0.92)), // docs: slate blue
-            (["sst", "db", "sqlite", "sqlite3", "wal", "ldb", "mdb", "realm"], hsb(0.02, 0.55, 0.92)), // databases: coral
-            (["plist", "log", "cache", "dat", "tmp"], hsb(0.10, 0.25, 0.80)), // system litter: tan
+    /// A colour group, as the file-type list labels it.
+    struct Kind {
+        let name: String
+        let color: RGB
+    }
+
+    /// The fixed extension groups, by lowercased extension.
+    static let fixed: [String: Kind] = {
+        var m: [String: Kind] = [:]
+        let groups: [(String, [String], RGB)] = [
+            ("Video", ["mp4", "mov", "mkv", "avi", "webm", "m4v"], hsb(0.055, 0.78, 0.98)), // orange
+            ("Images", ["jpg", "jpeg", "png", "heic", "gif", "webp", "tiff", "raw", "svg", "icns"], hsb(0.80, 0.55, 0.96)), // purple
+            ("Audio", ["mp3", "m4a", "aac", "wav", "flac", "aiff"], hsb(0.34, 0.65, 0.88)), // green
+            ("Archives", ["zip", "tar", "gz", "xz", "7z", "rar", "dmg", "pkg", "ipa", "xip"], hsb(0.125, 0.72, 0.97)), // amber
+            ("Binaries", ["dylib", "so", "framework", "bin", "exe", "o", "a", "metallib"], hsb(0.60, 0.62, 0.96)), // blue
+            ("Code", ["swift", "rs", "c", "h", "cpp", "m", "py", "js", "ts", "tsx", "jsx", "go", "java", "rb", "sh", "json", "yaml", "toml"], hsb(0.47, 0.60, 0.86)), // teal
+            ("Documents", ["pdf", "doc", "docx", "txt", "md", "pages", "key", "ppt", "pptx", "xls", "xlsx", "csv"], hsb(0.57, 0.40, 0.92)), // slate blue
+            ("Databases", ["sst", "db", "sqlite", "sqlite3", "wal", "ldb", "mdb", "realm"], hsb(0.02, 0.55, 0.92)), // coral
+            ("Logs & caches", ["plist", "log", "cache", "dat", "tmp"], hsb(0.10, 0.25, 0.80)), // system litter: tan
         ]
-        for (exts, color) in groups { for e in exts { m[e] = color } }
+        for (name, exts, color) in groups { for e in exts { m[e] = Kind(name: name, color: color) } }
         return m
     }()
 
     /// Extensionless files: warm neutral, clearly "a file", never void-grey.
     static let plain: RGB = hsb(0.09, 0.14, 0.82)
+    /// Every other file's colour while one file type is highlighted.
+    static func dimmed(_ c: RGB) -> RGB {
+        (0.05 + c.r * 0.2, 0.05 + c.g * 0.2, 0.05 + c.b * 0.2)
+    }
     /// Directory base (shows through where children are sub-pixel).
     /// Light neutral so dense regions read as texture, not holes.
     static let dir: RGB = hsb(0.58, 0.06, 0.66)
@@ -228,18 +239,13 @@ nonisolated enum TypeColor {
         }
 
         mutating func color(_ tree: Tree, _ node: Int) -> RGB {
-            let start = Int(tree.nameOff[node]), end = Int(tree.nameOff[node + 1])
-            var dot = end - 1
-            while dot > start, tree.nameBlob[dot] != UInt8(ascii: ".") { dot -= 1 }
-            // No extension, or a dotfile with nothing before the dot.
-            guard dot > start else { return TypeColor.plain }
-            let len = end - dot - 1
-            guard len > 0, len <= 16 else { return TypeColor.forName(tree.name(node)) }
+            guard let ext = TypeColor.extensionRange(tree, node) else { return TypeColor.plain }
+            guard ext.count <= 16 else { return TypeColor.forExtension(tree.nameBlob, ext) }
             var key = Key(a: 0, b: 0)
-            for i in (dot + 1)..<end {
+            for i in ext {
                 var b = tree.nameBlob[i]
                 if b >= 65, b <= 90 { b += 32 } // ASCII lowercase
-                if i - dot <= 8 { key.a = key.a << 8 | UInt64(b) } else { key.b = key.b << 8 | UInt64(b) }
+                if i - ext.lowerBound < 8 { key.a = key.a << 8 | UInt64(b) } else { key.b = key.b << 8 | UInt64(b) }
             }
             let slot = Int(truncatingIfNeeded: ((key.a ^ key.b &* 31) &* 0x9E37_79B9_7F4A_7C15) >> 56)
             if recentKey[slot] == key { return recentColor[slot] }
@@ -247,7 +253,7 @@ nonisolated enum TypeColor {
             if let known = byExt[key] {
                 c = known
             } else {
-                c = TypeColor.forName(tree.name(node))
+                c = TypeColor.forExtension(tree.nameBlob, ext)
                 byExt[key] = c
             }
             recentKey[slot] = key
@@ -259,15 +265,48 @@ nonisolated enum TypeColor {
     /// The hash-fallback colours, built once (NSColor conversion is slow).
     private static let hashHues: [RGB] = (0..<360).map { hsb(CGFloat($0) / 360.0, 0.52, 0.90) }
 
-    static func forName(_ name: String) -> RGB {
-        guard let dot = name.lastIndex(of: "."), dot != name.startIndex else { return plain }
-        let ext = name[name.index(after: dot)...].lowercased()
-        if ext.count > 10 { return plain }
-        if let c = fixed[ext] { return c }
+    /// Where node's extension sits in the name blob: the bytes after the
+    /// name's last dot. Nil for no dot, a dotfile with no other dot, or a
+    /// trailing dot. The engine's file-type totals (src/types.rs) read names
+    /// by the same rule.
+    static func extensionRange(_ tree: Tree, _ node: Int) -> Range<Int>? {
+        let start = Int(tree.nameOff[node]), end = Int(tree.nameOff[node + 1])
+        var dot = end - 1
+        while dot > start, tree.nameBlob[dot] != UInt8(ascii: ".") { dot -= 1 }
+        guard dot > start, dot + 1 < end else { return nil }
+        return (dot + 1)..<end
+    }
+
+    /// Whether node's extension is `ext`, already ASCII-lowercased; an empty
+    /// `ext` matches files without one.
+    static func hasExtension(_ tree: Tree, _ node: Int, _ ext: [UInt8]) -> Bool {
+        guard let range = extensionRange(tree, node) else { return ext.isEmpty }
+        guard range.count == ext.count else { return false }
+        for (i, want) in zip(range, ext) {
+            var b = tree.nameBlob[i]
+            if b >= 65, b <= 90 { b += 32 }
+            if b != want { return false }
+        }
+        return true
+    }
+
+    /// The group of an extension (without its dot; empty for none): the
+    /// fixed table first, then a stable hue per extension. The map and the
+    /// file-type list both colour through here.
+    static func kind(ofExtension ext: String) -> Kind {
+        let ext = ext.lowercased()
+        if ext.isEmpty { return Kind(name: "No extension", color: plain) }
+        if ext.count > 10 { return Kind(name: "Other", color: plain) }
+        if let k = fixed[ext] { return k }
         // fallback: stable hash -> vivid hue
         var h: UInt32 = 2166136261
         for b in ext.utf8 { h = (h ^ UInt32(b)) &* 16777619 }
-        return hashHues[Int(h % 360)]
+        return Kind(name: "Other", color: hashHues[Int(h % 360)])
+    }
+
+    private static func forExtension(_ blob: UnsafePointer<UInt8>, _ range: Range<Int>) -> RGB {
+        let bytes = UnsafeBufferPointer(start: blob + range.lowerBound, count: range.count)
+        return kind(ofExtension: String(decoding: bytes, as: UTF8.self)).color
     }
 }
 
@@ -320,13 +359,16 @@ nonisolated enum TreemapRenderer {
         var layoutMs: Double, paintMs: Double
     }
 
+    /// `highlight`, an ASCII-lowercased extension (empty: files without
+    /// one), keeps those files' colours and dims every other file.
     static func render(tree: Tree, pw: Int, ph: Int, scale: CGFloat, root rootIndex: Int,
-                       showFree: Bool, freeBytes: UInt64) -> Result {
+                       showFree: Bool, freeBytes: UInt64, highlight: [UInt8]? = nil) -> Result {
         // Lay it out once, then paint horizontal bands on every core; each
         // band runs the same steps in the same order over its own rows only,
         // so the result is pixel-identical to a single pass.
         let started = Date()
-        var layout = Layout(tree: tree, pw: pw, ph: ph, scale: scale, showFree: showFree, freeBytes: freeBytes)
+        var layout = Layout(tree: tree, pw: pw, ph: ph, scale: scale, showFree: showFree, freeBytes: freeBytes,
+                            highlight: highlight)
         layout.draw(rootIndex, CGRect(x: 0, y: 0, width: pw, height: ph), Cushion.baseHeight, Surface(), 0)
         layout.colors.save()
         let ops = layout.ops, shades = layout.shades
@@ -384,6 +426,7 @@ nonisolated enum TreemapRenderer {
         let tree: Tree
         let pw: Int, ph: Int, scale: CGFloat
         let showFree: Bool, freeBytes: UInt64
+        let highlight: [UInt8]?
         var ops: [PaintOp] = []
         var shades: [Shade] = []
         var rects: [TMRect] = []
@@ -395,10 +438,12 @@ nonisolated enum TreemapRenderer {
         var items: [Squarify.Item] = []
         var placed: [Squarify.Placed] = []
 
-        init(tree: Tree, pw: Int, ph: Int, scale: CGFloat, showFree: Bool, freeBytes: UInt64) {
+        init(tree: Tree, pw: Int, ph: Int, scale: CGFloat, showFree: Bool, freeBytes: UInt64,
+             highlight: [UInt8]? = nil) {
             self.tree = tree
             self.pw = pw; self.ph = ph; self.scale = scale
             self.showFree = showFree; self.freeBytes = freeBytes
+            self.highlight = highlight
             // Room for a typical dense map up front: regrowing these while
             // appending was ~8% of layout.
             let expected = min(tree.count, 1 << 18)
@@ -444,7 +489,12 @@ nonisolated enum TreemapRenderer {
             let ptRect = points(rect)
             guard tree.isDir(node) else {
                 leaves.append(TMRect(rect: ptRect, node: node, isDir: false))
-                shade(rect, colors.color(tree, node), s)
+                let rgb = colors.color(tree, node)
+                if let highlight, !TypeColor.hasExtension(tree, node, highlight) {
+                    shade(rect, TypeColor.dimmed(rgb), s)
+                } else {
+                    shade(rect, rgb, s)
+                }
                 return
             }
             rects.append(TMRect(rect: ptRect, node: node, isDir: true))

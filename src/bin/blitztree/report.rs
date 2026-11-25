@@ -1,9 +1,7 @@
 //! Read-only reports for agents. Suggestions are review candidates, not delete permissions.
+use blitztree::ranking::{largest_directories, largest_files, top_by_alloc};
 use blitztree::{cleanup, Tree};
 use serde_json::{json, Value};
-use std::cmp::Reverse;
-use std::collections::BinaryHeap;
-use std::path::PathBuf;
 
 pub struct Options {
     pub min_bytes: u64,
@@ -20,52 +18,14 @@ fn entry(t: &Tree, i: usize) -> Value {
     })
 }
 
-fn ordered(scan: &Tree, indices: impl Iterator<Item = usize>, limit: usize) -> Vec<usize> {
-    if limit == 0 {
-        return Vec::new();
-    }
-    // Keep only the requested top K, even for millions of equally sized files.
-    let mut heap: BinaryHeap<Reverse<(u64, Reverse<PathBuf>, usize)>> = BinaryHeap::new();
-    for i in indices {
-        let alloc = scan.alloc[i];
-        if heap.len() == limit
-            && heap
-                .peek()
-                .is_some_and(|Reverse((minimum, _, _))| alloc < *minimum)
-        {
-            continue;
-        }
-        let candidate = (alloc, Reverse(scan.path(i)), i);
-        if heap.len() < limit {
-            heap.push(Reverse(candidate));
-        } else if candidate > heap.peek().unwrap().0 {
-            heap.pop();
-            heap.push(Reverse(candidate));
-        }
-    }
-    let mut best: Vec<_> = heap.into_iter().map(|item| item.0).collect();
-    best.sort_unstable_by(|a, b| b.cmp(a));
-    best.into_iter().map(|item| item.2).collect()
-}
-
 pub fn inventory(scan: &Tree, options: &Options) -> Value {
-    let children = ordered(
+    let children = top_by_alloc(
         scan,
         scan.kids(0).iter().map(|&i| i as usize),
         options.limit,
     );
-    let files = ordered(
-        scan,
-        (1..scan.len())
-            .filter(|&i| !scan.is_dir(i) && scan.alloc[i] >= options.min_bytes),
-        options.limit,
-    );
-    let directories = ordered(
-        scan,
-        (1..scan.len())
-            .filter(|&i| scan.is_dir(i) && scan.alloc[i] >= options.min_bytes),
-        options.limit,
-    );
+    let files = largest_files(scan, options.min_bytes, options.limit);
+    let directories = largest_directories(scan, options.min_bytes, options.limit);
     json!({
         "largest_children": children.into_iter().map(|i| entry(scan, i)).collect::<Vec<_>>(),
         "largest_directories": directories.into_iter().map(|i| entry(scan, i)).collect::<Vec<_>>(),

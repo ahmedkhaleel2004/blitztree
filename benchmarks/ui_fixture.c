@@ -71,3 +71,14 @@ void bz_free(BzScan *h) {
     free(h->parents); free(h->alloc); free(h->flags); free(h->nfiles);
     free(h->child_off); free(h->children); free(h->name_off); free(h->name_blob); free(h);
 }
+BzLargest *bz_largest_files(BzScan *h, uint32_t limit, uint64_t min_bytes) { (void)h; (void)limit; (void)min_bytes; abort(); }
+uint32_t bz_largest_count(BzLargest *l) { (void)l; abort(); }
+const uint32_t *bz_largest_nodes(BzLargest *l) { (void)l; abort(); }
+void bz_largest_free(BzLargest *l) { (void)l; abort(); }
+BzTypes *bz_types(BzScan *h, uint32_t root) { (void)h; (void)root; abort(); }
+uint32_t bz_types_count(BzTypes *t) { (void)t; abort(); }
+const uint32_t *bz_types_ext_off(BzTypes *t) { (void)t; abort(); }
+const uint8_t *bz_types_ext_blob(BzTypes *t) { (void)t; abort(); }
+const uint64_t *bz_types_alloc(BzTypes *t) { (void)t; abort(); }
+const uint64_t *bz_types_files(BzTypes *t) { (void)t; abort(); }
+void bz_types_free(BzTypes *t) { (void)t; abort(); }
