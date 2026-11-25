@@ -156,13 +156,14 @@ final class AgentSetup {
     let kind: AgentKind
     private(set) var step: Step
     private var process: Process?
+    private var task: Task<Void, Never>?
     private var cancelled = false
 
     init(kind: AgentKind, installed: InstalledAgent?, envPath: String,
          done: @escaping (AgentEnvironment) -> Void) {
         self.kind = kind
         step = installed == nil ? .installing : .signingIn
-        Task {
+        task = Task {
             var path = installed?.path
             if path == nil {
                 let target = NSHomeDirectory() + "/.local/bin/" + kind.rawValue
@@ -175,11 +176,24 @@ final class AgentSetup {
             guard let path, !cancelled else { return }
             if !AgentLocator.isSignedIn(kind, path: path, envPath: envPath) {
                 step = .signingIn
-                // Opens the browser; the CLI finishes once the sign-in comes back.
-                _ = await exec(path, kind == .claude ? ["auth", "login"] : ["login"], envPath: envPath)
+                // The CLI prints the authorize URL and opens a browser only when
+                // its stdout is a terminal. Read that URL and open it here; the
+                // CLI stays up until the sign-in comes back.
+                let outcome = await AgentLogin.run(
+                    executable: path,
+                    arguments: kind == .claude ? ["auth", "login"] : ["login"],
+                    environmentPath: envPath,
+                    currentDirectory: NSHomeDirectory(),
+                    open: { url in
+                        Task { @MainActor in NSWorkspace.shared.open(url) }
+                    })
                 guard !cancelled else { return }
                 if !AgentLocator.isSignedIn(kind, path: path, envPath: envPath) {
-                    step = .failed("Sign-in didn't finish. Try again.")
+                    if let detail = outcome.detail {
+                        step = .failed("Sign-in didn't finish (\(detail)). Try again.")
+                    } else {
+                        step = .failed("Sign-in didn't finish. Try again.")
+                    }
                     return
                 }
             }
@@ -189,6 +203,7 @@ final class AgentSetup {
 
     func cancel() {
         cancelled = true
+        task?.cancel()
         process?.terminate()
     }
 
