@@ -30,4 +30,15 @@ const char *bz_cleanup_description(BzScan *h, uint64_t index);
 
 void bz_free(BzScan *h);
 
+typedef struct BzSearch BzSearch;
+
+// Interactive search over all nodes in the tree, off main thread.
+// query: UTF-8 search pattern (substring or wildcard with * and ?).
+// limit: max results to return (sorted largest size first).
+BzSearch *bz_search(BzScan *h, const char *query, uint32_t limit);
+uint64_t bz_search_total_matches(BzSearch *s);
+uint32_t bz_search_result_count(BzSearch *s);
+const uint32_t *bz_search_result_nodes(BzSearch *s);
+void bz_search_free(BzSearch *s);
+
 #endif
