@@ -58,16 +58,16 @@ fn main() {
         "ffi" | "digest" => {
             use blitztree::ffi::*;
             let path = std::ffi::CString::new(path.as_os_str().as_encoded_bytes()).unwrap();
-            let handle = bz_scan_start(path.as_ptr());
+            let handle = unsafe { bz_scan_start(path.as_ptr()) };
             let (mut files, mut dirs, mut bytes, mut done) = (0, 0, 0, 0);
             loop {
-                bz_progress(handle, &mut files, &mut dirs, &mut bytes, &mut done);
+                unsafe { bz_progress(handle, &mut files, &mut dirs, &mut bytes, &mut done) };
                 if done != 0 {
                     break;
                 }
                 std::thread::sleep(std::time::Duration::from_millis(1));
             }
-            let n = bz_take_tree(handle) as usize;
+            let n = unsafe { bz_take_tree(handle) } as usize;
             assert!(n > 0);
             if mode == "digest" {
                 use std::slice::from_raw_parts as s;
@@ -102,7 +102,7 @@ fn main() {
                     bz_errors(handle),
                 )
             };
-            bz_free(handle);
+            unsafe { bz_free(handle) };
             result
         }
         "bulk-count" => {

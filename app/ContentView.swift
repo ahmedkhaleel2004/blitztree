@@ -71,6 +71,16 @@ struct ContentView: View {
         .onChange(of: model.agentRun == nil) { if model.agentRun != nil { showCleanup = true } }
         .onChange(of: model.panelRequests) { showCleanup = true }
         .hidingWindowTitle()
+        .background {
+            // The toolbar's Stop button takes Esc; ⌘. is the other usual way out.
+            Button("") {
+                model.stopScan()
+            }
+            .keyboardShortcut(".", modifiers: .command)
+            .disabled(!model.scanning || model.stopping)
+            .opacity(0)
+            .allowsHitTesting(false)
+        }
         .onAppear {
             // Never start a whole-disk scan without FDA: every protected
             // app container would fire a permission prompt.
@@ -156,6 +166,17 @@ struct ContentView: View {
             }
             .disabled(model.scanning || model.cleanupTrash.running)
             .help("Rescan")
+
+            if model.scanning {
+                Button {
+                    model.stopScan()
+                } label: {
+                    Label(model.stopping ? "Stopping…" : "Stop", systemImage: "stop.fill")
+                }
+                .disabled(model.stopping)
+                .keyboardShortcut(.escape, modifiers: [])
+                .help("Stop scanning (Esc or ⌘.)")
+            }
         }
 
         if #available(macOS 26, *) {
@@ -225,11 +246,35 @@ struct ContentView: View {
 
     private var idleOverlay: some View {
         VStack(spacing: 10) {
-            Image(systemName: "internaldrive")
-                .font(.system(size: 40))
-                .foregroundStyle(.secondary)
-            Text("Pick a target and scan")
-                .foregroundStyle(.secondary)
+            if model.scanFailed {
+                Image(systemName: "exclamationmark.triangle")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary)
+                Text("The scan failed")
+                    .foregroundStyle(.secondary)
+                Text("BlitzTree could not scan \(model.scanRoot)")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                Button("Rescan") { model.startScan() }
+            } else if model.scanCancelled {
+                Image(systemName: "stop.circle")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary)
+                Text("Scan stopped")
+                    .foregroundStyle(.secondary)
+                Text("BlitzTree stopped scanning \(model.scanRoot) before it finished.")
+                    .font(.caption)
+                    .foregroundStyle(.tertiary)
+                    .textSelection(.enabled)
+                Button("Rescan") { model.startScan() }
+            } else {
+                Image(systemName: "internaldrive")
+                    .font(.system(size: 40))
+                    .foregroundStyle(.secondary)
+                Text("Pick a target and scan")
+                    .foregroundStyle(.secondary)
+            }
         }
     }
 
@@ -258,6 +303,11 @@ private struct ScanProgress: View {
             Text("\(Fmt.num(model.files)) files · \(Fmt.num(model.dirs)) folders · \(String(format: "%.2f", model.elapsed))s")
                 .font(.system(.body, design: .monospaced))
                 .foregroundStyle(.secondary)
+            if model.stopping {
+                Text("Stopping…")
+                    .font(.callout)
+                    .foregroundStyle(.tertiary)
+            }
         }
         // No spinner: the counters are the progress, and a ProgressView is an
         // AppKit view whose insertion recomputed the window's key-view loop
@@ -305,6 +355,7 @@ private struct ScanStatusBar: View {
                             .buttonStyle(.borderless)
                         }
                     }
+                    CoverageButton(coverage: tree.coverage)
                     Text("scanned in \(String(format: "%.1fs", model.elapsed))")
                         .foregroundStyle(.secondary)
                         .monospacedDigit()
@@ -317,6 +368,44 @@ private struct ScanStatusBar: View {
         .font(.callout)
         .padding(.horizontal, 12)
         .padding(.vertical, 6)
+    }
+}
+
+/// After a scan: whether every folder was read, and what was left out.
+/// The popover lists the same fields the CLI reports.
+private struct CoverageButton: View {
+    let coverage: BzCoverage
+    @State private var shown = false
+
+    var body: some View {
+        Button {
+            shown.toggle()
+        } label: {
+            Label("Coverage", systemImage: coverage.complete ? "checkmark.circle" : "exclamationmark.triangle")
+                .font(.caption)
+        }
+        .buttonStyle(.borderless)
+        .foregroundStyle(coverage.complete ? .tertiary : .secondary)
+        .help("What the scan could and could not read")
+        .popover(isPresented: $shown, arrowEdge: .top) {
+            VStack(alignment: .leading, spacing: 8) {
+                Text(CoverageText.headline(coverage))
+                    .font(.callout.weight(.semibold))
+                ForEach(CoverageText.lines(coverage), id: \.self) { line in
+                    Text(line)
+                        .font(.callout)
+                        .foregroundStyle(.secondary)
+                }
+                if !coverage.complete {
+                    Text("Folders marked with a warning sign in the list were only partly read.")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
+            }
+            .fixedSize(horizontal: false, vertical: true)
+            .frame(width: 320, alignment: .leading)
+            .padding(14)
+        }
     }
 }
 
@@ -364,26 +453,47 @@ final class NameCell: NSTableCellView {
     private static let font = NSFont.systemFont(ofSize: 13)
     private static let lineHeight = ceil(font.ascender - font.descender + font.leading)
 
+    /// A warning sign at the row's right edge for a folder that was only
+    /// partly read; hidden otherwise.
+    private let partialBadge = NSImageView()
+    private static let badgeWidth: CGFloat = 18
+
     override init(frame: NSRect) {
         super.init(frame: frame)
         let iv = NSImageView()
         let tf = NSTextField(labelWithString: "")
         tf.font = Self.font
         tf.lineBreakMode = .byTruncatingMiddle
+        partialBadge.image = NSImage(systemSymbolName: "exclamationmark.triangle.fill", accessibilityDescription: nil)
+        partialBadge.contentTintColor = .systemOrange
+        partialBadge.isHidden = true
         addSubview(iv)
         addSubview(tf)
+        addSubview(partialBadge)
         imageView = iv
         textField = tf
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Marks the row as partly read, with `note` as its tooltip and spoken
+    /// label; nil clears the mark (rows are reused).
+    func showPartial(_ note: String?) {
+        partialBadge.isHidden = note == nil
+        partialBadge.toolTip = note
+        partialBadge.setAccessibilityLabel(note)
+        needsLayout = true
+    }
+
     override func layout() {
         super.layout()
         let h = bounds.height
+        let badge = partialBadge.isHidden ? 0 : Self.badgeWidth
         imageView?.frame = NSRect(x: 2, y: ((h - 16) / 2).rounded(), width: 16, height: 16)
         textField?.frame = NSRect(x: 23, y: ((h - Self.lineHeight) / 2).rounded(),
-                                  width: max(0, bounds.width - 25), height: Self.lineHeight)
+                                  width: max(0, bounds.width - 25 - badge), height: Self.lineHeight)
+        partialBadge.frame = NSRect(x: max(0, bounds.width - Self.badgeWidth), y: ((h - 14) / 2).rounded(),
+                                    width: 14, height: 14)
     }
 }
 
@@ -579,6 +689,9 @@ struct OutlinePanel: NSViewRepresentable {
                 let name = tree.name(it.id)
                 cell.textField?.stringValue = name
                 cell.imageView?.image = icon(for: name, isDir: tree.isDir(it.id))
+                // Only a folder whose own listing was partial is marked; the
+                // ones above it are lower bounds too, shown in the map's tooltip.
+                (cell as? NameCell)?.showPartial(tree.isPartlyRead(it.id) ? tree.coverageNote(it.id) : nil)
             } else if column == "size" {
                 cell.textField?.stringValue = Fmt.size(tree.alloc[it.id])
             } else {

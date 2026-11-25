@@ -585,6 +585,7 @@ final class SunburstNSView: NSView {
         model?.hovered = node
         if let node, let tree = model?.tree {
             toolTip = "\(tree.displayPath(node))\n\(Fmt.size(tree.alloc[node]))"
+                + (tree.coverageNote(node).map { "\n" + $0 } ?? "")
         } else {
             toolTip = nil
         }

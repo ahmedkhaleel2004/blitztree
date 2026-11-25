@@ -13,6 +13,8 @@ nonisolated final class Tree: @unchecked Sendable {
     let logical: UnsafePointer<UInt64>
     let nFiles: UnsafePointer<UInt32>
     let flags: UnsafePointer<UInt8>
+    /// Per node: everything below it was read (see `bz_complete`).
+    let complete: UnsafePointer<Bool>
     let childOff: UnsafePointer<UInt32>
     let childArr: UnsafePointer<UInt32>
     let nameOff: UnsafePointer<UInt32>
@@ -20,15 +22,20 @@ nonisolated final class Tree: @unchecked Sendable {
     let cleanupCount: Int
     let cleanupNodes: UnsafePointer<UInt32>
     let errors: UInt64
+    /// What the scan could not read: the account the CLI prints as `coverage`.
+    let coverage: BzCoverage
 
     init?(handle: OpaquePointer) {
         let n = bz_take_tree(handle)
+        var coverage = BzCoverage()
         guard n > 0,
               let parents = bz_parents(handle),
               let alloc = bz_alloc(handle),
               let logical = bz_logical(handle),
               let nFiles = bz_nfiles(handle),
               let flags = bz_flags(handle),
+              let complete = bz_complete(handle),
+              bz_coverage(handle, &coverage),
               let childOff = bz_child_off(handle),
               let childArr = bz_children(handle),
               let nameOff = bz_name_off(handle),
@@ -42,6 +49,8 @@ nonisolated final class Tree: @unchecked Sendable {
         self.logical = logical
         self.nFiles = nFiles
         self.flags = flags
+        self.complete = complete
+        self.coverage = coverage
         self.childOff = childOff
         self.childArr = childArr
         self.nameOff = nameOff
@@ -54,6 +63,21 @@ nonisolated final class Tree: @unchecked Sendable {
     deinit { bz_free(handle) }
 
     func isDir(_ i: Int) -> Bool { flags[i] & 1 != 0 }
+
+    /// The node's own listing was partial (an unreadable entry, a skipped
+    /// cloud or mounted folder, a name dropped), whatever its subtree holds.
+    func isPartlyRead(_ i: Int) -> Bool { flags[i] & 2 != 0 }
+
+    /// Why a node's size is only a lower bound; nil when everything in it was read.
+    func coverageNote(_ i: Int) -> String? {
+        if isPartlyRead(i) {
+            return "Not fully read: some items in this folder could not be read or were skipped"
+        }
+        if !complete[i] {
+            return "Contains folders that were not fully read, so its size is a lower bound"
+        }
+        return nil
+    }
 
     func cleanupDescription(_ index: Int) -> String {
         guard let label = bz_cleanup_description(handle, UInt64(index)) else { return "" }
@@ -160,6 +184,15 @@ final class ScanModel {
     var dirs: UInt64 = 0
     var bytes: UInt64 = 0
     var scanning = false
+    /// The last scan ended without a tree (panicked, or could not start).
+    /// `scanning` is false again, so a new scan is allowed; cleared when one starts.
+    private(set) var scanFailed = false
+    /// The last scan was stopped by the user and there is no earlier tree to
+    /// fall back on. Cleared when a scan starts.
+    private(set) var scanCancelled = false
+    /// Stop was pressed and the engine is winding the scan down; `scanning`
+    /// stays true until it reports done.
+    private(set) var stopping = false
     var elapsed: Double = 0
     var tree: Tree?
     var scanRoot: String = {
@@ -260,10 +293,27 @@ final class ScanModel {
     private var startedAt: Date?
     private var activity: NSObjectProtocol?
     private var volumeTask: Task<VolumeSpace, Never>?
+    private var scanGeneration: UInt64 = 0
+
+    /// What was on screen when a scan started, kept so that stopping the scan
+    /// puts it back.
+    private struct Previous {
+        let tree: Tree
+        let scanRoot: String
+        let freeBytes: UInt64
+        let unscannedBytes: UInt64
+        let elapsed: Double
+    }
+    private var previous: Previous?
 
     func startScan(path: String? = nil) {
         if scanning || cleanupTrash.running { return }
+        previous = tree.map {
+            Previous(tree: $0, scanRoot: scanRoot, freeBytes: freeBytes,
+                     unscannedBytes: unscannedBytes, elapsed: elapsed)
+        }
         if let path { scanRoot = path }
+        scanGeneration &+= 1
         tree = nil
         cleanup = []
         viewRoot = 0
@@ -271,6 +321,15 @@ final class ScanModel {
         hovered = nil
         files = 0; dirs = 0; bytes = 0; elapsed = 0
         lastPollAt = nil; maxPollGap = 0
+        scanFailed = false
+        scanCancelled = false
+        stopping = false
+        guard let started = bz_scan_start(scanRoot) else {
+            previous = nil
+            scanFailed = true
+            return
+        }
+        handle = started
         scanning = true
         startedAt = Date()
         // Keep the process out of App Nap / timer coalescing while scanning.
@@ -283,7 +342,6 @@ final class ScanModel {
         // the main thread never waits synchronously on that service.
         let volumePath = scanRoot
         volumeTask = Task.detached(priority: .userInitiated) { VolumeSpace.read(volumePath) }
-        handle = bz_scan_start(scanRoot)
 
         // 60 Hz: the elapsed time ticks every frame, so the screen keeps
         // moving while the engine assembles the tree after the last file is
@@ -294,6 +352,15 @@ final class ScanModel {
         // Common modes: keep polling while a control is being clicked.
         RunLoop.main.add(timer, forMode: .common)
         self.timer = timer
+    }
+
+    /// Stops the scan under way. The engine reads no further folder and
+    /// reports done promptly; the tree that was on screen before the scan (if
+    /// any) comes back, otherwise the window says the scan was stopped.
+    func stopScan() {
+        guard scanning, !stopping, let handle else { return }
+        stopping = true
+        bz_cancel(handle)
     }
 
     private var lastPollAt: Date?
@@ -315,22 +382,49 @@ final class ScanModel {
         elapsed = -(startedAt?.timeIntervalSinceNow ?? 0)
         if done != 0 {
             let doneAt = Date()
-            let result = Tree(handle: handle)
+            let generation = scanGeneration
+            // Read before the tree is taken: a stopped scan and a failed one
+            // both have none, and only one of them is an error.
+            let stopped = bz_scan_status(handle) == Int32(BZ_SCAN_CANCELLED)
+            let result = stopped ? nil : Tree(handle: handle)
             self.handle = nil
             if result == nil { bz_free(handle) }
             let pendingVolume = volumeTask
             volumeTask = nil
+            if stopped {
+                pendingVolume?.cancel()
+                finishScan(nil, stopped: true, generation: generation, space: VolumeSpace(free: nil, used: nil), doneAt: doneAt)
+                return
+            }
             Task {
                 let space = await pendingVolume?.value ?? VolumeSpace(free: nil, used: nil)
-                finishScan(result, space: space, doneAt: doneAt)
+                finishScan(result, stopped: false, generation: generation, space: space, doneAt: doneAt)
             }
         }
     }
 
-    private func finishScan(_ result: Tree?, space: VolumeSpace, doneAt: Date) {
+    private func finishScan(_ result: Tree?, stopped: Bool, generation: UInt64, space: VolumeSpace, doneAt: Date) {
+        guard generation == scanGeneration else { return }
         timer?.invalidate()
         timer = nil
-        tree = result
+        let earlier = previous
+        previous = nil
+        if stopped {
+            NSLog("BZ scan stopped after %.2f s, %llu files read", elapsed, files)
+            scanFailed = false
+            if let earlier {
+                scanRoot = earlier.scanRoot
+                freeBytes = earlier.freeBytes
+                unscannedBytes = earlier.unscannedBytes
+                elapsed = earlier.elapsed
+                tree = earlier.tree
+            } else {
+                scanCancelled = true
+            }
+        } else {
+            tree = result
+            scanFailed = result == nil
+        }
         if tree != nil { hasShownTree = true }
         if ProcessInfo.processInfo.environment["BZ_TIMING"] != nil {
             // Queue latency includes awaiting metadata and UI updates; it is
@@ -341,7 +435,8 @@ final class ScanModel {
             NSLog("BZ done at %.3f, longest gap between polls %.1f ms", doneAt.timeIntervalSinceReferenceDate, maxPollGap * 1000)
         }
         scanning = false
-        if let tree {
+        stopping = false
+        if !stopped, let tree {
             Task {
                 let found = await Task.detached(priority: .userInitiated) { Cleanup.find(in: tree) }.value
                 // A rescan may have replaced the tree while discovery ran.
@@ -352,15 +447,17 @@ final class ScanModel {
             }
             NSLog("BZ scan done: %llu nodes, %llu unreadable dirs", UInt64(tree.count), tree.errors)
         }
-        freeBytes = space.free ?? 0
-        // Coverage honesty: compare scanned bytes with what the volume
-        // says it holds. The difference is root-only space (Spotlight
-        // index, unified logs, …) no unelevated app can read.
-        unscannedBytes = 0
-        if let tree, let used = space.used {
-            let seen = tree.alloc[0]
-            if used > seen {
-                unscannedBytes = used - seen
+        if !stopped {
+            freeBytes = space.free ?? 0
+            // Coverage honesty: compare scanned bytes with what the volume
+            // says it holds. The difference is root-only space (Spotlight
+            // index, unified logs, …) no unelevated app can read.
+            unscannedBytes = 0
+            if let tree, let used = space.used {
+                let seen = tree.alloc[0]
+                if used > seen {
+                    unscannedBytes = used - seen
+                }
             }
         }
         if let activity { ProcessInfo.processInfo.endActivity(activity) }
@@ -396,6 +493,41 @@ nonisolated func volumeUsedBytes(_ path: String) -> UInt64? {
     guard status == 0 else { return nil }
     // Packed buffer: u_int32_t length, then off_t at offset 4 (unaligned).
     return withUnsafeBytes(of: &reply) { $0.loadUnaligned(fromByteOffset: 4, as: UInt64.self) }
+}
+
+/// The scan's coverage in sentences (the status bar's popover): what the
+/// engine could not read or skipped. The same fields the CLI reports.
+nonisolated enum CoverageText {
+    static func headline(_ c: BzCoverage) -> String {
+        c.complete
+            ? "Every folder was read in full."
+            : "Some folders were only partly read, so their sizes are lower bounds."
+    }
+
+    /// One line per thing left unread; empty when there is none.
+    static func lines(_ c: BzCoverage) -> [String] {
+        var out: [String] = []
+        // `errors` is the total and already holds every entry error and every
+        // dropped name; each is listed once, on its own line.
+        let listed = c.entry_errors &+ c.invalid_names
+        let otherErrors = c.errors > listed ? c.errors - listed : 0
+        if otherErrors > 0 {
+            out.append("\(Fmt.num(otherErrors)) folders could not be read (permissions, or changed during the scan)")
+        }
+        if c.entry_errors > 0 {
+            out.append("\(Fmt.num(c.entry_errors)) entries could not be read or were malformed")
+        }
+        if c.invalid_names > 0 {
+            out.append("\(Fmt.num(c.invalid_names)) items with names that are not valid UTF-8 were left out, with everything inside them")
+        }
+        if c.skipped_cloud_directories > 0 {
+            out.append("\(Fmt.num(c.skipped_cloud_directories)) cloud-only folders were not opened, so nothing was downloaded")
+        }
+        if c.skipped_mount_points > 0 {
+            out.append("\(Fmt.num(c.skipped_mount_points)) other volumes mounted inside were not scanned")
+        }
+        return out
+    }
 }
 
 nonisolated enum Fmt {
