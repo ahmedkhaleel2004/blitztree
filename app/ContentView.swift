@@ -286,6 +286,12 @@ private struct ScanStatusBar: View {
                 } else {
                     Text("\(Fmt.num(UInt64(tree.nFiles[model.viewRoot]))) files · \(Fmt.size(tree.alloc[model.viewRoot]))")
                     Spacer()
+                    if model.overcountedBytes > 1_000_000_000 {
+                        Text("Sizes exceed disk usage by \(Fmt.size(model.overcountedBytes))")
+                            .font(.caption)
+                            .foregroundStyle(.tertiary)
+                            .help("Files cloned on APFS and edited afterwards share most of their blocks, but each one is counted in full.")
+                    }
                     if tree.errors > 0 {
                         if FDA.isActive() {
                             // Root-owned system dirs: unreadable by design,

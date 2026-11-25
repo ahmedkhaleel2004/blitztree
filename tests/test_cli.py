@@ -48,6 +48,29 @@ class AgentCLITests(unittest.TestCase):
         self.assertEqual(data.stat().st_mtime_ns, before.st_mtime_ns)
         self.assertEqual(data.read_bytes(), b"x" * 8192)
 
+    def test_apfs_clones_count_once(self):
+        # Chrome's code_sign_clone pattern: one bundle cloned many times.
+        bundle = self.home / "Applications/App.app"
+        for name in ("binary", "Frameworks/lib"):
+            self.file(f"Applications/App.app/{name}", size=1 << 20)
+        copies = 12
+        for i in range(copies):
+            target = self.home / f"tmp/code_sign_clone.{i:02d}"
+            target.mkdir(parents=True)
+            cloned = subprocess.run(["cp", "-c", "-R", str(bundle), str(target / "App.app")],
+                                    capture_output=True, text=True)
+            self.assertEqual(cloned.returncode, 0, f"cp -c needs an APFS temp directory: {cloned.stderr}")
+        one = sum(p.stat().st_blocks * 512 for p in bundle.rglob("*") if p.is_file())
+        result = self.run_cli("scan", "--root", str(self.home), "--min-bytes", "1", "--limit", "1000")
+        self.assertEqual(result["summary"]["file_count"], 2 * (copies + 1))
+        self.assertEqual(result["summary"]["allocated_bytes"], one)
+        self.assertEqual(result["summary"]["logical_bytes"], 2 << 20)
+        self.assertEqual(result["coverage"]["shared_allocated_bytes"], copies * one)
+        self.assertEqual(result["coverage"]["clone_ids_unavailable_directories"], 0)
+        sizes = {Path(d["path"]).name: d["allocated_bytes"] for d in result["report"]["largest_directories"]}
+        self.assertEqual(sizes.get("App.app"), one, "the first path, Applications/App.app, owns the bytes")
+        self.assertNotIn("tmp", sizes, "clones whose source is scanned add nothing")
+
     def test_no_symlink_traversal(self):
         outside = self.root / "outside"
         (outside / "node_modules").mkdir(parents=True)

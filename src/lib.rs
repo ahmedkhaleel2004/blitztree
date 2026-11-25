@@ -51,6 +51,13 @@ const DIR_MNTSTATUS_MNTPOINT: u32 = 0x0000_0001;
 const ATTR_FILE_LINKCOUNT: u32 = 0x0000_0001;
 const ATTR_FILE_TOTALSIZE: u32 = 0x0000_0002;
 const ATTR_FILE_ALLOCSIZE: u32 = 0x0000_0004;
+/// With FSOPT_ATTR_CMN_EXTENDED, `forkattr` requests these extended common
+/// attributes. They are packed after the file attributes, in bit order.
+const FSOPT_ATTR_CMN_EXTENDED: u64 = 0x0000_0020;
+const ATTR_CMNEXT_CLONEID: u32 = 0x0000_0100;
+const ATTR_CMNEXT_EXT_FLAGS: u32 = 0x0000_0200;
+/// The file may share blocks with another (an APFS clone, or a clone's source).
+const EF_MAY_SHARE_BLOCKS: u64 = 0x0000_0001;
 
 const VDIR: u32 = 2;
 /// Contents live in the cloud (iCloud Drive, File Provider). Opening such a
@@ -143,6 +150,29 @@ pub struct Progress {
     pub invalid_names: AtomicU64,
     pub skipped_cloud_dirs: AtomicU64,
     pub skipped_mount_points: AtomicU64,
+    /// Allocated bytes not counted again because another scanned path
+    /// already holds the same data: hard links and whole APFS clones.
+    pub shared_bytes: AtomicU64,
+    /// Directories whose volume did not report clone ids. Clones there (if
+    /// the volume has any) count once per path, as `du` counts them.
+    pub clone_ids_unavailable_dirs: AtomicU64,
+    /// Set after the volume refused the extended attributes once, so the
+    /// remaining directories ask for the plain ones directly.
+    no_extended_attrs: std::sync::atomic::AtomicBool,
+}
+
+/// Identifies the data a file's allocated bytes belong to, for files that
+/// may share them with another path. All hard links of an inode, and every
+/// full APFS clone of a file, share one clone id: one data stream. A file
+/// edited after cloning gets its own clone id and is counted in full.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+struct DataStream {
+    dev: u32,
+    id: u64,
+    /// `id` is an APFS clone id rather than a file id; the two are kept apart
+    /// so a volume that reports clone ids for only some entries can't merge
+    /// unrelated files.
+    by_clone_id: bool,
 }
 
 struct Entry {
@@ -157,8 +187,13 @@ struct Entry {
     mount_point: bool,
     size: u64,
     alloc: u64,
-    /// `(device, file id)` when the file has more than one hard link.
-    hardlink: Option<(u32, u64)>,
+    /// Set when the file has more than one hard link or may share blocks
+    /// with a clone, so its bytes are counted once per data stream.
+    stream: Option<DataStream>,
+    /// The volume reported no clone id for this file.
+    no_clone_id: bool,
+    /// The volume listed the file without its allocated size.
+    alloc_missing: bool,
 }
 
 impl Entry {
@@ -218,10 +253,15 @@ fn read_dir_bulk(path: &CStr, s: &mut Scratch, progress: &Progress) -> Option<bo
         volattr: 0,
         dirattr: ATTR_DIR_MOUNTSTATUS,
         fileattr: ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE,
-        forkattr: 0,
+        forkattr: ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_EXT_FLAGS,
     };
+    let mut options = FSOPT_ATTR_CMN_EXTENDED;
+    if progress.no_extended_attrs.load(Ordering::Relaxed) {
+        (attrlist.forkattr, options) = (0, 0);
+    }
 
     let mut complete = true;
+    let mut read_any = false;
     loop {
         let n = unsafe {
             getattrlistbulk(
@@ -229,9 +269,21 @@ fn read_dir_bulk(path: &CStr, s: &mut Scratch, progress: &Progress) -> Option<bo
                 &mut attrlist,
                 s.buf.as_mut_ptr() as *mut c_void,
                 BUF_SIZE,
-                0,
+                options,
             )
         };
+        if n < 0
+            && options != 0
+            && !read_any
+            && std::io::Error::last_os_error().raw_os_error() == Some(libc::EINVAL)
+        {
+            // A file system without extended common attributes. Nothing was
+            // consumed yet, so ask again for the plain set; clones there are
+            // counted per path and reported as untracked.
+            progress.no_extended_attrs.store(true, Ordering::Relaxed);
+            (attrlist.forkattr, options) = (0, 0);
+            continue;
+        }
         if n <= 0 {
             if n < 0 {
                 progress.errors.fetch_add(1, Ordering::Relaxed);
@@ -239,15 +291,56 @@ fn read_dir_bulk(path: &CStr, s: &mut Scratch, progress: &Progress) -> Option<bo
             }
             break;
         }
+        read_any = true;
         let mut off = 0usize;
         for _ in 0..n {
-            let len = u32_at(&s.buf, off) as usize;
-            complete &= parse_entry(&s.buf[off..off + len], &mut s.entries, &mut s.names, progress);
+            // A record must hold its own length and fit in the buffer.
+            let len = s.buf.get(off..off + 4).map_or(0, |_| u32_at(&s.buf, off) as usize);
+            let Some(record) = s.buf.get(off..off + len).filter(|_| len >= 4) else {
+                progress.entry_errors.fetch_add(1, Ordering::Relaxed);
+                progress.errors.fetch_add(1, Ordering::Relaxed);
+                complete = false;
+                break;
+            };
+            complete &= parse_entry(record, &mut s.entries, &mut s.names, progress);
             off += len;
         }
     }
+    complete &= fill_missing_alloc(fd, s, progress);
     unsafe { libc::close(fd) };
     Some(complete)
+}
+
+/// Some file systems (FAT32 through FSKit) list files without their
+/// allocated size. Ask for each such file's blocks instead of counting it
+/// as empty. False if any could not be read; those keep their logical size.
+fn fill_missing_alloc(dir_fd: c_int, s: &mut Scratch, progress: &Progress) -> bool {
+    let mut complete = true;
+    let mut start = 0;
+    let mut path = Vec::new();
+    for e in s.entries.iter_mut() {
+        let name = &s.names[start..e.name_end as usize];
+        start = e.name_end as usize;
+        if !e.alloc_missing {
+            continue;
+        }
+        path.clear();
+        path.extend_from_slice(name);
+        path.push(0);
+        let mut st: libc::stat = unsafe { std::mem::zeroed() };
+        let status = unsafe {
+            libc::fstatat(dir_fd, path.as_ptr().cast(), &mut st, libc::AT_SYMLINK_NOFOLLOW)
+        };
+        if status == 0 {
+            e.alloc = (st.st_blocks.max(0) as u64).saturating_mul(512);
+        } else {
+            progress.entry_errors.fetch_add(1, Ordering::Relaxed);
+            progress.errors.fetch_add(1, Ordering::Relaxed);
+            e.alloc = e.size;
+            complete = false;
+        }
+    }
+    complete
 }
 
 fn u32_at(b: &[u8], off: usize) -> u32 {
@@ -265,22 +358,54 @@ fn u64_at(b: &[u8], off: usize) -> u64 {
 /// Parse one getattrlistbulk entry. Attribute order within an entry is fixed:
 /// RETURNED_ATTRS, ERROR, then common attrs by bit (NAME, DEVID, OBJTYPE,
 /// FLAGS, FILEID), then dir attrs (MOUNTSTATUS), then file attrs (LINKCOUNT,
-/// TOTALSIZE, ALLOCSIZE). Dir attrs come back only for directories and file
-/// attrs only for files. False (and counted) if the entry had to be dropped.
+/// TOTALSIZE, ALLOCSIZE), then extended common attrs (CLONEID, EXT_FLAGS).
+/// Dir attrs come back only for directories and file attrs only for files;
+/// each group is read only when RETURNED_ATTRS says it is there. False (and
+/// counted) if the entry had to be dropped.
 fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &Progress) -> bool {
+    let malformed = || {
+        progress.entry_errors.fetch_add(1, Ordering::Relaxed);
+        progress.errors.fetch_add(1, Ordering::Relaxed);
+        false
+    };
     let mut off = 4usize; // skip length
+    if e.len() < off + 20 {
+        return malformed();
+    }
     let ret_common = u32_at(e, off);
     let ret_dir = u32_at(e, off + 8);
     let ret_file = u32_at(e, off + 12);
+    let ret_ext = u32_at(e, off + 16);
     off += 20; // attribute_set_t: 5 x u32
+    // Every fixed-size field the entry claims must fit inside it; the parse
+    // below then reads only within `e`.
+    let fixed: usize = [
+        (ret_common & ATTR_CMN_ERROR, 4),
+        (ret_common & ATTR_CMN_NAME, 8),
+        (ret_common & ATTR_CMN_DEVID, 4),
+        (ret_common & ATTR_CMN_OBJTYPE, 4),
+        (ret_common & ATTR_CMN_FLAGS, 4),
+        (ret_common & ATTR_CMN_FILEID, 8),
+        (ret_dir & ATTR_DIR_MOUNTSTATUS, 4),
+        (ret_file & ATTR_FILE_LINKCOUNT, 4),
+        (ret_file & ATTR_FILE_TOTALSIZE, 8),
+        (ret_file & ATTR_FILE_ALLOCSIZE, 8),
+        (ret_ext & ATTR_CMNEXT_CLONEID, 8),
+        (ret_ext & ATTR_CMNEXT_EXT_FLAGS, 8),
+    ]
+    .iter()
+    .filter(|(bit, _)| *bit != 0)
+    .map(|(_, len)| len)
+    .sum();
+    if e.len() < off + fixed {
+        return malformed();
+    }
 
     if ret_common & ATTR_CMN_ERROR != 0 {
         let err = u32_at(e, off);
         off += 4;
         if err != 0 {
-            progress.entry_errors.fetch_add(1, Ordering::Relaxed);
-            progress.errors.fetch_add(1, Ordering::Relaxed);
-            return false;
+            return malformed();
         }
     }
 
@@ -293,9 +418,15 @@ fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &P
     if ret_common & ATTR_CMN_NAME != 0 {
         let data_off = u32_at(e, off) as i32 as isize;
         let data_len = u32_at(e, off + 4) as usize;
-        let start = (off as isize + data_off) as usize;
         // data_len includes the trailing NUL
-        name = &e[start..start + data_len.saturating_sub(1)];
+        let range = (off as isize)
+            .checked_add(data_off)
+            .and_then(|start| usize::try_from(start).ok())
+            .and_then(|start| Some(start..start.checked_add(data_len.saturating_sub(1))?));
+        let Some(name_bytes) = range.and_then(|r| e.get(r)) else {
+            return malformed();
+        };
+        name = name_bytes;
         if std::str::from_utf8(name).is_err() {
             return invalid_name();
         }
@@ -346,12 +477,29 @@ fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &P
     }
     if ret_file & ATTR_FILE_ALLOCSIZE != 0 {
         alloc = i64_at(e, off).max(0) as u64;
+        off += 8;
+    }
+
+    let mut clone_id = None;
+    if ret_ext & ATTR_CMNEXT_CLONEID != 0 {
+        clone_id = Some(u64_at(e, off)).filter(|&id| id != 0);
+        off += 8;
+    }
+    // Without the flag, sharing is unknown: only hard links are deduplicated.
+    let mut may_share = false;
+    if ret_ext & ATTR_CMNEXT_EXT_FLAGS != 0 {
+        may_share = u64_at(e, off) & EF_MAY_SHARE_BLOCKS != 0;
     }
 
     if name.is_empty() {
         return invalid_name();
     }
     names.extend_from_slice(name);
+    let key = match clone_id {
+        Some(id) => DataStream { dev, id, by_clone_id: true },
+        None => DataStream { dev, id: file_id, by_clone_id: false },
+    };
+    let stream = (!is_dir && (links > 1 || (may_share && clone_id.is_some()))).then_some(key);
     out.push(Entry {
         name_end: names.len() as u32,
         is_dir,
@@ -359,7 +507,9 @@ fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &P
         mount_point,
         size,
         alloc,
-        hardlink: (!is_dir && links > 1).then_some((dev, file_id)),
+        stream,
+        no_clone_id: !is_dir && clone_id.is_none(),
+        alloc_missing: !is_dir && ret_file & ATTR_FILE_ALLOCSIZE == 0,
     });
     true
 }
@@ -372,29 +522,30 @@ fn parse_entry(e: &[u8], out: &mut Vec<Entry>, names: &mut Vec<u8>, progress: &P
 /// indices, and no node owns a heap allocation.
 struct Arena {
     tree: Tree,
-    /// Attribute an inode's bytes to its lexicographically first scanned path,
+    /// Attribute a data stream's bytes (an inode's hard links, or a family of
+    /// whole APFS clones) to its lexicographically first scanned path,
     /// independently of worker scheduling. This is accounting, not an estimate
-    /// of how many bytes deleting any one of its links would reclaim.
-    hardlinks: HashMap<(u32, u64), u32>,
+    /// of how many bytes deleting any one of those paths would reclaim.
+    streams: HashMap<DataStream, u32>,
 }
 
 impl Arena {
     /// Called under the arena lock after appending a file, before totals are
     /// aggregated. Returns newly accounted bytes for the progress counter.
-    fn account_file(&mut self, i: u32, hardlink: Option<(u32, u64)>) -> u64 {
+    fn account_file(&mut self, i: u32, stream: Option<DataStream>) -> u64 {
         let t = &mut self.tree;
-        let Some(key) = hardlink else {
+        let Some(key) = stream else {
             return t.alloc[i as usize];
         };
-        let Some(&previous) = self.hardlinks.get(&key) else {
-            self.hardlinks.insert(key, i);
+        let Some(&previous) = self.streams.get(&key) else {
+            self.streams.insert(key, i);
             return t.alloc[i as usize];
         };
         let (i, previous) = (i as usize, previous as usize);
         let loser = if t.path_parts(i as u32) < t.path_parts(previous as u32) {
             t.logical[i] = t.logical[previous];
             t.alloc[i] = t.alloc[previous];
-            self.hardlinks.insert(key, i as u32);
+            self.streams.insert(key, i as u32);
             previous
         } else {
             i
@@ -475,14 +626,21 @@ fn walk<'s>(scope: &rayon::Scope<'s>, shared: &'s Shared<'s>, path: CString, dir
             t.name_off.extend(entries.iter().map(|e| blob + e.name_end));
             t.name_blob.extend_from_slice(names);
             let mut bytes = 0;
+            let mut shared_bytes = 0;
             for (k, e) in entries.iter().enumerate() {
                 if !e.is_dir {
-                    bytes += arena.account_file(base + k as u32, e.hardlink);
+                    let added = arena.account_file(base + k as u32, e.stream);
+                    bytes += added;
+                    shared_bytes += e.alloc - added;
                 }
             }
+            progress.shared_bytes.fetch_add(shared_bytes, Ordering::Relaxed);
             (base, bytes)
         };
         progress.bytes.fetch_add(bytes, Ordering::Relaxed);
+        if entries.iter().any(|e| e.no_clone_id) {
+            progress.clone_ids_unavailable_dirs.fetch_add(1, Ordering::Relaxed);
+        }
 
         let mut start = 0;
         for (i, e) in entries.iter().enumerate() {
@@ -629,7 +787,7 @@ pub fn scan(root: &Path, progress: &Progress) -> Tree {
     let shared = Shared {
         arena: Mutex::new(Arena {
             tree,
-            hardlinks: HashMap::new(),
+            streams: HashMap::new(),
         }),
         progress,
     };
@@ -698,7 +856,7 @@ pub fn scan_count(root: &Path, progress: &Progress) {
 mod tests {
     use super::*;
 
-    fn bulk_record(name: &str, is_dir: bool, flags: u32, mount_status: u32, links: u32) -> Vec<u8> {
+    fn bulk_record(name: &str, is_dir: bool, flags: u32, mount_status: u32, links: u32, ext: Option<(u64, u64)>) -> Vec<u8> {
         let mut e = vec![0u8; 4];
         let common = ATTR_CMN_RETURNED_ATTRS
             | ATTR_CMN_ERROR
@@ -713,7 +871,8 @@ mod tests {
         } else {
             ATTR_FILE_LINKCOUNT | ATTR_FILE_TOTALSIZE | ATTR_FILE_ALLOCSIZE
         };
-        for value in [common, 0, dir, file, 0, 0] {
+        let ext_bits = if ext.is_some() { ATTR_CMNEXT_CLONEID | ATTR_CMNEXT_EXT_FLAGS } else { 0 };
+        for value in [common, 0, dir, file, ext_bits, 0] {
             e.extend_from_slice(&value.to_le_bytes());
         }
         let name_ref = e.len();
@@ -728,6 +887,10 @@ mod tests {
             e.extend_from_slice(&links.to_le_bytes());
             e.extend_from_slice(&12345i64.to_le_bytes());
             e.extend_from_slice(&16384i64.to_le_bytes());
+        }
+        if let Some((clone_id, ext_flags)) = ext {
+            e.extend_from_slice(&clone_id.to_le_bytes());
+            e.extend_from_slice(&ext_flags.to_le_bytes());
         }
         let name_offset = (e.len() - name_ref) as u32;
         e[name_ref..name_ref + 4].copy_from_slice(&name_offset.to_le_bytes());
@@ -748,7 +911,7 @@ mod tests {
             ("plain", true, 0, 0, 1),
             ("linked-é", false, 0, 0, 2),
         ] {
-            let record = bulk_record(name, dir, flags, mount, links);
+            let record = bulk_record(name, dir, flags, mount, links, None);
             assert!(parse_entry(&record, &mut entries, &mut names, &Progress::default()));
         }
         assert_eq!(entries.len(), 4);
@@ -758,8 +921,92 @@ mod tests {
         let descend: Vec<_> = entries.iter().map(|e| e.descend()).collect();
         assert_eq!(descend, [false, false, true, false], "cloud-only and mount points are skipped");
         assert_eq!(&names[entries[2].name_end as usize..], "linked-é".as_bytes());
-        assert_eq!(entries[3].hardlink, Some((17, 123456)));
+        // No clone id from the volume: hard links still key by file id.
+        assert_eq!(entries[3].stream, Some(DataStream { dev: 17, id: 123456, by_clone_id: false }));
+        assert!(entries[3].no_clone_id && !entries[2].no_clone_id);
         assert_eq!((entries[3].size, entries[3].alloc), (12345, 16384));
+    }
+
+    #[test]
+    fn bulk_parser_keys_clones_and_hardlinks_by_data_stream() {
+        let parse = |links, ext, is_dir| {
+            let (mut entries, mut names) = (Vec::new(), Vec::new());
+            let record = bulk_record("f", is_dir, 0, 0, links, ext);
+            assert!(parse_entry(&record, &mut entries, &mut names, &Progress::default()));
+            assert_eq!(&names[..], b"f", "the name is read past the extended attributes");
+            entries.pop().unwrap()
+        };
+        let clone = |id| DataStream { dev: 17, id, by_clone_id: true };
+        let e = parse(1, Some((99, EF_MAY_SHARE_BLOCKS | 0x40)), false);
+        assert_eq!(e.stream, Some(clone(99)));
+        assert_eq!((e.size, e.alloc, e.no_clone_id), (12345, 16384, false));
+        assert_eq!(parse(3, Some((99, EF_MAY_SHARE_BLOCKS)), false).stream, Some(clone(99)));
+        assert_eq!(parse(2, Some((123456, 0)), false).stream, Some(clone(123456)));
+        assert_eq!(parse(1, Some((123456, 0)), false).stream, None);
+        assert_eq!(parse(1, Some((5, EF_MAY_SHARE_BLOCKS)), true).stream, None);
+        assert_eq!(parse(1, Some((0, EF_MAY_SHARE_BLOCKS)), false).stream, None);
+        assert!(parse(1, Some((0, EF_MAY_SHARE_BLOCKS)), false).no_clone_id);
+    }
+
+    #[test]
+    fn missing_allocated_size_is_read_per_file_or_reported() {
+        let root = std::env::temp_dir().join(format!("bz-test-alloc-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("here"), vec![1u8; 70_000]).unwrap();
+        let expected = {
+            use std::os::unix::fs::MetadataExt;
+            std::fs::symlink_metadata(root.join("here")).unwrap().blocks() * 512
+        };
+        let mut s = Scratch::default();
+        for (name, missing) in [("here", true), ("gone", true), ("kept", false)] {
+            s.names.extend_from_slice(name.as_bytes());
+            s.entries.push(Entry {
+                name_end: s.names.len() as u32,
+                is_dir: false,
+                dataless: false,
+                mount_point: false,
+                size: 70_000,
+                alloc: if missing { 0 } else { 12_345 },
+                stream: None,
+                no_clone_id: true,
+                alloc_missing: missing,
+            });
+        }
+        let dir = CString::new(root.as_os_str().as_encoded_bytes()).unwrap();
+        let fd = unsafe { libc::open(dir.as_ptr(), libc::O_RDONLY | libc::O_DIRECTORY) };
+        assert!(fd >= 0);
+        let progress = Progress::default();
+        let complete = fill_missing_alloc(fd, &mut s, &progress);
+        unsafe { libc::close(fd) };
+        let _ = std::fs::remove_dir_all(&root);
+        assert!(!complete, "a file that vanished leaves the directory incomplete");
+        assert_eq!(s.entries[0].alloc, expected, "read from the file's blocks");
+        assert_eq!(s.entries[1].alloc, 70_000, "unknown: logical size, reported as an error");
+        assert_eq!(s.entries[2].alloc, 12_345, "sizes the volume reported are kept");
+        assert_eq!(progress.errors.load(Ordering::Relaxed), 1);
+    }
+
+    #[test]
+    fn bulk_parser_drops_truncated_records_without_panicking() {
+        let full = bulk_record("name", false, 0, 0, 2, Some((9, EF_MAY_SHARE_BLOCKS)));
+        let name_end = full.len() - 1;
+        for cut in 0..name_end {
+            let progress = Progress::default();
+            let (mut entries, mut names) = (Vec::new(), Vec::new());
+            let ok = parse_entry(&full[..cut], &mut entries, &mut names, &progress);
+            assert!(!ok, "a record cut at {cut} of {name_end} bytes must be dropped");
+            assert!(entries.is_empty() && names.is_empty());
+            assert_eq!(progress.errors.load(Ordering::Relaxed), 1, "cut at {cut}");
+        }
+        let mut bad = full.clone();
+        bad[28..32].copy_from_slice(&0x7fff_fff0u32.to_le_bytes());
+        let progress = Progress::default();
+        assert!(!parse_entry(&bad, &mut Vec::new(), &mut Vec::new(), &progress));
+        assert_eq!(progress.entry_errors.load(Ordering::Relaxed), 1);
+        let mut negative = full;
+        negative[28..32].copy_from_slice(&(-1000i32 as u32).to_le_bytes());
+        assert!(!parse_entry(&negative, &mut Vec::new(), &mut Vec::new(), &Progress::default()));
     }
 
     /// Every child is listed once, under its parent, after it.
@@ -909,10 +1156,10 @@ mod tests {
             tree.push("a", 2, 8192, 4096, false);
             tree.push("z", 1, 8192, 4096, false);
             tree.push("y", 1, 8192, 4096, false);
-            let mut arena = Arena { tree, hardlinks: HashMap::new() };
+            let mut arena = Arena { tree, streams: HashMap::new() };
             let added: u64 = order
                 .into_iter()
-                .map(|i| arena.account_file(i, Some((7, 42))))
+                .map(|i| arena.account_file(i, Some(DataStream { dev: 7, id: 42, by_clone_id: true })))
                 .sum();
             let t = &mut arena.tree;
             assert_eq!(added, 4096, "progress counts the inode once");
@@ -979,6 +1226,91 @@ mod tests {
 
         assert_eq!(tree.n_files[0], 2, "both names are listed");
         assert_eq!(tree.logical[0], 1 << 20, "but the bytes count once");
+    }
+
+    fn node(t: &Tree, path: &str) -> usize {
+        let root = t.path(0);
+        (0..t.len())
+            .find(|&i| t.path(i) == root.join(path))
+            .unwrap_or_else(|| panic!("{path} not scanned"))
+    }
+
+    fn clone_file(from: &Path, to: &Path) {
+        let (from_c, to_c) = (
+            CString::new(from.as_os_str().as_encoded_bytes()).unwrap(),
+            CString::new(to.as_os_str().as_encoded_bytes()).unwrap(),
+        );
+        let status = unsafe { libc::clonefile(from_c.as_ptr(), to_c.as_ptr(), 0) };
+        assert_eq!(
+            status,
+            0,
+            "clonefile({}) failed: {}; this test needs an APFS temp directory",
+            to.display(),
+            std::io::Error::last_os_error()
+        );
+    }
+
+    /// APFS clones (`cp -c`, Chrome's code_sign_clone)
+    /// share one data stream; each reports the full allocated size.
+    #[test]
+    fn apfs_clones_count_once_and_edited_clones_count_again() {
+        let root = std::env::temp_dir().join(format!("bz-test-clones-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for d in ["a", "b", "c", "d"] {
+            std::fs::create_dir_all(root.join(d)).unwrap();
+        }
+        let data: Vec<u8> = (0..1u32 << 20).map(|i| (i.wrapping_mul(2654435761) >> 13) as u8).collect();
+        std::fs::write(root.join("a/orig"), &data).unwrap();
+        clone_file(&root.join("a/orig"), &root.join("b/clone"));
+        clone_file(&root.join("b/clone"), &root.join("c/clone-of-clone"));
+        std::fs::hard_link(root.join("b/clone"), root.join("c/link-to-clone")).unwrap();
+        clone_file(&root.join("a/orig"), &root.join("d/edited"));
+        {
+            use std::io::{Seek, SeekFrom, Write};
+            let mut f = std::fs::OpenOptions::new().write(true).open(root.join("d/edited")).unwrap();
+            f.seek(SeekFrom::Start(4096)).unwrap();
+            f.write_all(b"edited").unwrap();
+            f.sync_all().unwrap();
+        }
+        let one = std::fs::symlink_metadata(root.join("a/orig")).unwrap();
+        let one_alloc = {
+            use std::os::unix::fs::MetadataExt;
+            one.blocks() * 512
+        };
+
+        let tree = scan(&root, &Progress::default());
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(tree.n_files[0], 5, "every name is listed");
+        assert_eq!(tree.alloc[node(&tree, "a/orig")], one_alloc, "first path owns the stream");
+        for shared in ["b/clone", "c/clone-of-clone", "c/link-to-clone"] {
+            assert_eq!(tree.alloc[node(&tree, shared)], 0, "{shared} shares a's blocks");
+            assert_eq!(tree.logical[node(&tree, shared)], 0, "{shared} shares a's bytes");
+        }
+        assert_eq!(tree.alloc[node(&tree, "d/edited")], one_alloc);
+        assert_eq!(tree.alloc[0], 2 * one_alloc);
+        assert_eq!(tree.logical[0], 2 * data.len() as u64);
+    }
+
+    #[test]
+    fn without_clone_ids_clones_count_per_path_and_are_reported() {
+        let root = std::env::temp_dir().join(format!("bz-test-noext-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("orig"), vec![3u8; 1 << 20]).unwrap();
+        clone_file(&root.join("orig"), &root.join("clone"));
+        std::fs::hard_link(root.join("orig"), root.join("link")).unwrap();
+
+        let progress = Progress::default();
+        progress.no_extended_attrs.store(true, Ordering::Relaxed);
+        let tree = scan(&root, &progress);
+        let _ = std::fs::remove_dir_all(&root);
+
+        assert_eq!(tree.n_files[0], 3);
+        assert_eq!(tree.logical[0], 2 << 20, "the clone counts again, the hard link does not");
+        assert_eq!(progress.clone_ids_unavailable_dirs.load(Ordering::Relaxed), 1);
+        assert_eq!(tree.alloc[node(&tree, "orig")], 0);
+        assert_eq!(progress.shared_bytes.load(Ordering::Relaxed), tree.alloc[node(&tree, "link")]);
     }
 
     #[test]
